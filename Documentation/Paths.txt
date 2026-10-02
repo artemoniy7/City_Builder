@@ -8,3 +8,6 @@ Engine/
 ├── Audio/         — miniaudio / FMOD
 ├── Scripting/     — Lua/AngelScript
 └── Game/          — собственно игра
+└── shaders/       - all shaders
+└── src/           - all start codes
+└── Documentation  - it's obvious
