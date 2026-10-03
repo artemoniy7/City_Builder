@@ -285,7 +285,6 @@ void Renderer::CreateAssets() {
 
     // ---------- Geometry ----------
     constexpr std::array<Vertex, kSceneVertexCount> vertices{{
-        // Cube, resting on the platform at y = -1.
         {{-1,0,-1},{1,0,0},{0,0,-1}}, {{-1,2,-1},{1,0,0},{0,0,-1}}, {{ 1,2,-1},{1,0,0},{0,0,-1}},
         {{-1,0,-1},{1,0,0},{0,0,-1}}, {{ 1,2,-1},{1,0,0},{0,0,-1}}, {{ 1,0,-1},{1,0,0},{0,0,-1}},
         {{ 1,0, 1},{0,1,0},{0,0, 1}}, {{ 1,2, 1},{0,1,0},{0,0, 1}}, {{-1,2, 1},{0,1,0},{0,0, 1}},
@@ -298,7 +297,6 @@ void Renderer::CreateAssets() {
         {{-1,2,-1},{1,0,1},{0, 1,0}}, {{ 1,2, 1},{1,0,1},{0, 1,0}}, {{ 1,2,-1},{1,0,1},{0, 1,0}},
         {{-1,0, 1},{0,1,1},{0,-1,0}}, {{-1,0,-1},{0,1,1},{0,-1,0}}, {{ 1,0,-1},{0,1,1},{0,-1,0}},
         {{-1,0, 1},{0,1,1},{0,-1,0}}, {{ 1,0,-1},{0,1,1},{0,-1,0}}, {{ 1,0, 1},{0,1,1},{0,-1,0}},
-        // A large, horizontal platform below the cube.
         {{-14,-1,-14},{0.18f,0.62f,0.24f},{0,1,0}}, {{-14,-1, 14},{0.18f,0.62f,0.24f},{0,1,0}}, {{ 14,-1, 14},{0.18f,0.62f,0.24f},{0,1,0}},
         {{-14,-1,-14},{0.18f,0.62f,0.24f},{0,1,0}}, {{ 14,-1, 14},{0.18f,0.62f,0.24f},{0,1,0}}, {{ 14,-1,-14},{0.18f,0.62f,0.24f},{0,1,0}},
     }};
@@ -350,7 +348,6 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     if (GetAsyncKeyState('F') & 0x8000) cameraPosition_.y -= speed;
     if (GetAsyncKeyState('T') & 0x8000) cameraPitch_ += turnSpeed;
     if (GetAsyncKeyState('G') & 0x8000) cameraPitch_ -= turnSpeed;
-    // Keep the view between horizontal and straight down; the camera cannot look above the horizon.
     cameraPitch_ = std::clamp(cameraPitch_, -std::numbers::pi_v<float> * 0.5f, 0.0f);
     const bool spaceDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
     if (spaceDown && !spaceWasDown_) topDownView_ = !topDownView_;
@@ -369,14 +366,14 @@ void Renderer::Render() {
         std::sin(cameraPitch_),
         std::cos(cameraYaw_) * horizontalLookScale,
     };
-    // The initial pitch keeps the platform and cube in frame; T/G adjust it afterwards.
-    const math::Vector3 target = topDownView_
-        ? cameraPosition_ + math::Vector3{0.0f, -1.0f, 0.0f}
-        : cameraPosition_ + lookDirection;
-    // A downward-facing camera needs a horizontal up vector. Deriving it from yaw keeps Q/E rotating the view.
-    const bool useYawBasedUp = topDownView_ || std::abs(lookDirection.y) > 0.99f;
-    const math::Vector3 yawBasedUp{-std::cos(cameraYaw_), 0.0f, std::sin(cameraYaw_)};
-    const math::Vector3 up = useYawBasedUp ? yawBasedUp : math::Vector3{0.0f, 1.0f, 0.0f};
+    const math::Vector3 target = cameraPosition_ + lookDirection;
+
+    // up = cross(lookDirection, right) — всегда перпендикулярен lookDirection,
+    // поэтому LookAt не вырождается ни при каком pitch. При pitch = 0 даёт {0, 1, 0},
+    // при pitch = -π/2 — горизонтальный вектор {sin(yaw), 0, cos(yaw)}. Переход плавный.
+    const math::Vector3 right{std::cos(cameraYaw_), 0.0f, -std::sin(cameraYaw_)};
+    const math::Vector3 up = math::Normalize(math::Cross(lookDirection, right));
+
     const auto viewProjection = math::Matrix4::Multiply(
         math::Matrix4::LookAt(cameraPosition_, target, up),
         math::Matrix4::Perspective(fieldOfView_, static_cast<float>(width_) / height_, 0.1f, 100.0f));
@@ -397,7 +394,6 @@ void Renderer::Render() {
     ThrowIfFailed(commandAllocator_->Reset());
     ThrowIfFailed(commandList_->Reset(commandAllocator_.Get(), pipelineState_.Get()));
 
-    // First render the scene from the fixed sun position into a high-resolution depth map.
     const D3D12_VIEWPORT shadowViewport{0.0f, 0.0f, static_cast<float>(kShadowMapSize), static_cast<float>(kShadowMapSize), 0.0f, 1.0f};
     const D3D12_RECT shadowScissor{0, 0, static_cast<LONG>(kShadowMapSize), static_cast<LONG>(kShadowMapSize)};
     const auto shadowDsv = shadowDsvHeap_->GetCPUDescriptorHandleForHeapStart();
