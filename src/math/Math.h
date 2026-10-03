@@ -4,6 +4,25 @@
 
 namespace city::math {
 
+struct Vector3 final {
+    float x{};
+    float y{};
+    float z{};
+
+    Vector3 operator+(const Vector3& other) const { return {x + other.x, y + other.y, z + other.z}; }
+    Vector3 operator-(const Vector3& other) const { return {x - other.x, y - other.y, z - other.z}; }
+    Vector3 operator*(float scale) const { return {x * scale, y * scale, z * scale}; }
+};
+
+inline float Dot(const Vector3& a, const Vector3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+inline Vector3 Cross(const Vector3& a, const Vector3& b) {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+inline Vector3 Normalize(const Vector3& value) {
+    const float length = std::sqrt(Dot(value, value));
+    return length > 0.0001f ? value * (1.0f / length) : Vector3{};
+}
+
 struct Matrix4 final {
     float values[16]{};
 
@@ -36,6 +55,16 @@ struct Matrix4 final {
     static Matrix4 Translation(float x, float y, float z) {
         return {{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
                  0.0f, 0.0f, 1.0f, 0.0f, x, y, z, 1.0f}};
+    }
+
+    static Matrix4 LookAt(const Vector3& eye, const Vector3& target, const Vector3& up) {
+        const Vector3 forward = Normalize(target - eye);
+        const Vector3 right = Normalize(Cross(up, forward));
+        const Vector3 correctedUp = Cross(forward, right);
+        return {{right.x, correctedUp.x, forward.x, 0.0f,
+                 right.y, correctedUp.y, forward.y, 0.0f,
+                 right.z, correctedUp.z, forward.z, 0.0f,
+                 -Dot(right, eye), -Dot(correctedUp, eye), -Dot(forward, eye), 1.0f}};
     }
 
     static Matrix4 Perspective(float fovY, float aspectRatio, float nearPlane, float farPlane) {
