@@ -50,10 +50,10 @@ private:
     UINT rtvDescriptorSize_{};
     UINT64 fenceValue_{};
     std::chrono::steady_clock::time_point lastFrameAt_{std::chrono::steady_clock::now()};
-    math::Vector3 cameraPosition_{0.0f, 13.0f, -10.0f};
+    math::Vector3 cameraPosition_{0.0f, 10.0f, -16.0f};
     float cameraYaw_{0.0f};
     float fieldOfView_{0.95f};
-    bool topDownView_{true};
+    bool topDownView_{};
     bool spaceWasDown_{};
 
     Microsoft::WRL::ComPtr<IDXGIFactory6> factory_;
