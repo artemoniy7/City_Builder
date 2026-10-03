@@ -1,0 +1,308 @@
+#include "graphics/Renderer.h"
+
+#include "math/Math.h"
+
+#include <d3dcompiler.h>
+
+#include <array>
+#include <cstring>
+#include <filesystem>
+#include <stdexcept>
+
+using Microsoft::WRL::ComPtr;
+
+namespace {
+
+std::filesystem::path ShaderPath() {
+    std::array<wchar_t, MAX_PATH> executablePath{};
+    GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size()));
+    return std::filesystem::path(executablePath.data()).parent_path() / L"shaders" / L"Cube.hlsl";
+}
+
+} // namespace
+
+namespace city {
+
+Renderer::Renderer(HWND window) : window_(window) {
+    RECT clientRect{};
+    GetClientRect(window_, &clientRect);
+    width_ = static_cast<UINT>(clientRect.right - clientRect.left);
+    height_ = static_cast<UINT>(clientRect.bottom - clientRect.top);
+    CreateDeviceResources();
+    CreateWindowResources(width_, height_);
+    CreateAssets();
+}
+
+Renderer::~Renderer() {
+    if (device_) {
+        WaitForGpu();
+    }
+    if (fenceEvent_) {
+        CloseHandle(fenceEvent_);
+    }
+}
+
+void Renderer::ThrowIfFailed(HRESULT result) const {
+    if (FAILED(result)) {
+        throw std::runtime_error("A DirectX 12 operation failed.");
+    }
+}
+
+void Renderer::CreateDeviceResources() {
+#if defined(_DEBUG)
+    ComPtr<ID3D12Debug> debugController;
+    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
+        debugController->EnableDebugLayer();
+    }
+#endif
+    ThrowIfFailed(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory_)));
+    ThrowIfFailed(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_)));
+
+    D3D12_COMMAND_QUEUE_DESC queueDescription{};
+    queueDescription.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    ThrowIfFailed(device_->CreateCommandQueue(&queueDescription, IID_PPV_ARGS(&commandQueue_)));
+    ThrowIfFailed(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&commandAllocator_)));
+    ThrowIfFailed(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, commandAllocator_.Get(), nullptr,
+        IID_PPV_ARGS(&commandList_)));
+    ThrowIfFailed(commandList_->Close());
+    ThrowIfFailed(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)));
+    fenceEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!fenceEvent_) {
+        throw std::runtime_error("Unable to create the GPU fence event.");
+    }
+}
+
+void Renderer::CreateWindowResources(UINT width, UINT height) {
+    DXGI_SWAP_CHAIN_DESC1 swapChainDescription{};
+    swapChainDescription.BufferCount = kFrameCount;
+    swapChainDescription.Width = width;
+    swapChainDescription.Height = height;
+    swapChainDescription.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    swapChainDescription.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapChainDescription.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    swapChainDescription.SampleDesc.Count = 1;
+
+    ComPtr<IDXGISwapChain1> swapChain;
+    ThrowIfFailed(factory_->CreateSwapChainForHwnd(commandQueue_.Get(), window_, &swapChainDescription, nullptr, nullptr, &swapChain));
+    ThrowIfFailed(factory_->MakeWindowAssociation(window_, DXGI_MWA_NO_ALT_ENTER));
+    ThrowIfFailed(swapChain.As(&swapChain_));
+    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
+
+    D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDescription{};
+    rtvHeapDescription.NumDescriptors = kFrameCount;
+    rtvHeapDescription.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    ThrowIfFailed(device_->CreateDescriptorHeap(&rtvHeapDescription, IID_PPV_ARGS(&rtvHeap_)));
+    rtvDescriptorSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+    D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDescription{};
+    dsvHeapDescription.NumDescriptors = 1;
+    dsvHeapDescription.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    ThrowIfFailed(device_->CreateDescriptorHeap(&dsvHeapDescription, IID_PPV_ARGS(&dsvHeap_)));
+
+    auto handle = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+    for (UINT i = 0; i < kFrameCount; ++i) {
+        ThrowIfFailed(swapChain_->GetBuffer(i, IID_PPV_ARGS(&renderTargets_[i])));
+        device_->CreateRenderTargetView(renderTargets_[i].Get(), nullptr, handle);
+        handle.ptr += rtvDescriptorSize_;
+    }
+
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC depthDescription{};
+    depthDescription.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depthDescription.Width = width;
+    depthDescription.Height = height;
+    depthDescription.DepthOrArraySize = 1;
+    depthDescription.MipLevels = 1;
+    depthDescription.Format = DXGI_FORMAT_D32_FLOAT;
+    depthDescription.SampleDesc.Count = 1;
+    depthDescription.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    depthDescription.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE clearValue{};
+    clearValue.Format = DXGI_FORMAT_D32_FLOAT;
+    clearValue.DepthStencil.Depth = 1.0f;
+    ThrowIfFailed(device_->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &depthDescription,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, &clearValue, IID_PPV_ARGS(&depthStencil_)));
+    device_->CreateDepthStencilView(depthStencil_.Get(), nullptr, dsvHeap_->GetCPUDescriptorHandleForHeapStart());
+}
+
+void Renderer::CreateAssets() {
+    D3D12_ROOT_PARAMETER rootParameter{};
+    rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParameter.Descriptor.ShaderRegister = 0;
+    rootParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    D3D12_ROOT_SIGNATURE_DESC rootSignatureDescription{};
+    rootSignatureDescription.NumParameters = 1;
+    rootSignatureDescription.pParameters = &rootParameter;
+    rootSignatureDescription.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ComPtr<ID3DBlob> serializedRootSignature;
+    ComPtr<ID3DBlob> errors;
+    ThrowIfFailed(D3D12SerializeRootSignature(&rootSignatureDescription, D3D_ROOT_SIGNATURE_VERSION_1,
+        &serializedRootSignature, &errors));
+    ThrowIfFailed(device_->CreateRootSignature(0, serializedRootSignature->GetBufferPointer(),
+        serializedRootSignature->GetBufferSize(), IID_PPV_ARGS(&rootSignature_)));
+
+    ComPtr<ID3DBlob> vertexShader;
+    ComPtr<ID3DBlob> pixelShader;
+    const auto shaderPath = ShaderPath();
+    ThrowIfFailed(D3DCompileFromFile(shaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VSMain", "vs_5_0",
+        D3DCOMPILE_ENABLE_STRICTNESS, 0, &vertexShader, &errors));
+    ThrowIfFailed(D3DCompileFromFile(shaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PSMain", "ps_5_0",
+        D3DCOMPILE_ENABLE_STRICTNESS, 0, &pixelShader, &errors));
+
+    const std::array<D3D12_INPUT_ELEMENT_DESC, 2> inputLayout{{
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    }};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDescription{};
+    pipelineDescription.pRootSignature = rootSignature_.Get();
+    pipelineDescription.VS = {vertexShader->GetBufferPointer(), vertexShader->GetBufferSize()};
+    pipelineDescription.PS = {pixelShader->GetBufferPointer(), pixelShader->GetBufferSize()};
+    pipelineDescription.SampleMask = UINT_MAX;
+    pipelineDescription.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pipelineDescription.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pipelineDescription.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pipelineDescription.RasterizerState.DepthClipEnable = TRUE;
+    pipelineDescription.DepthStencilState.DepthEnable = TRUE;
+    pipelineDescription.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pipelineDescription.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    pipelineDescription.InputLayout = {inputLayout.data(), static_cast<UINT>(inputLayout.size())};
+    pipelineDescription.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pipelineDescription.NumRenderTargets = 1;
+    pipelineDescription.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pipelineDescription.SampleDesc.Count = 1;
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&pipelineDescription, IID_PPV_ARGS(&pipelineState_)));
+
+    constexpr std::array<Vertex, 36> vertices{{
+        // Front, back, left, right, top, bottom. Triangle-list keeps the shaders intentionally simple.
+        {{{-1,-1,-1},{1,0,0}}}, {{{-1, 1,-1},{1,0,0}}}, {{{ 1, 1,-1},{1,0,0}}}, {{{-1,-1,-1},{1,0,0}}}, {{{ 1, 1,-1},{1,0,0}}}, {{{ 1,-1,-1},{1,0,0}}},
+        {{{ 1,-1, 1},{0,1,0}}}, {{{ 1, 1, 1},{0,1,0}}}, {{{-1, 1, 1},{0,1,0}}}, {{{ 1,-1, 1},{0,1,0}}}, {{{-1, 1, 1},{0,1,0}}}, {{{-1,-1, 1},{0,1,0}}},
+        {{{-1,-1, 1},{0,0,1}}}, {{{-1, 1, 1},{0,0,1}}}, {{{-1, 1,-1},{0,0,1}}}, {{{-1,-1, 1},{0,0,1}}}, {{{-1, 1,-1},{0,0,1}}}, {{{-1,-1,-1},{0,0,1}}},
+        {{{ 1,-1,-1},{1,1,0}}}, {{{ 1, 1,-1},{1,1,0}}}, {{{ 1, 1, 1},{1,1,0}}}, {{{ 1,-1,-1},{1,1,0}}}, {{{ 1, 1, 1},{1,1,0}}}, {{{ 1,-1, 1},{1,1,0}}},
+        {{{-1, 1,-1},{1,0,1}}}, {{{-1, 1, 1},{1,0,1}}}, {{{ 1, 1, 1},{1,0,1}}}, {{{-1, 1,-1},{1,0,1}}}, {{{ 1, 1, 1},{1,0,1}}}, {{{ 1, 1,-1},{1,0,1}}},
+        {{{-1,-1, 1},{0,1,1}}}, {{{-1,-1,-1},{0,1,1}}}, {{{ 1,-1,-1},{0,1,1}}}, {{{-1,-1, 1},{0,1,1}}}, {{{ 1,-1,-1},{0,1,1}}}, {{{ 1,-1, 1},{0,1,1}}},
+    }};
+    const UINT bufferSize = static_cast<UINT>(vertices.size() * sizeof(Vertex));
+    D3D12_HEAP_PROPERTIES uploadHeap{};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bufferDescription{};
+    bufferDescription.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufferDescription.Width = bufferSize;
+    bufferDescription.Height = 1;
+    bufferDescription.DepthOrArraySize = 1;
+    bufferDescription.MipLevels = 1;
+    bufferDescription.SampleDesc.Count = 1;
+    bufferDescription.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&vertexBuffer_)));
+    void* vertexData{};
+    ThrowIfFailed(vertexBuffer_->Map(0, nullptr, &vertexData));
+    std::memcpy(vertexData, vertices.data(), bufferSize);
+    vertexBuffer_->Unmap(0, nullptr);
+    vertexBufferView_ = {vertexBuffer_->GetGPUVirtualAddress(), bufferSize, sizeof(Vertex)};
+
+    bufferDescription.Width = sizeof(SceneConstants);
+    ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&constantBuffer_)));
+    ThrowIfFailed(constantBuffer_->Map(0, nullptr, reinterpret_cast<void**>(&mappedConstants_)));
+}
+
+void Renderer::Render() {
+    const float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - startedAt_).count();
+    const auto world = math::Matrix4::Multiply(math::Matrix4::RotationY(elapsed), math::Matrix4::RotationX(elapsed * 0.45f));
+    const auto view = math::Matrix4::Translation(0.0f, 0.0f, 5.0f);
+    const auto projection = math::Matrix4::Perspective(1.05f, static_cast<float>(width_) / height_, 0.1f, 100.0f);
+    const auto mvp = math::Matrix4::Multiply(math::Matrix4::Multiply(world, view), projection);
+    std::memcpy(mappedConstants_->mvp, mvp.values, sizeof(mvp.values));
+
+    ThrowIfFailed(commandAllocator_->Reset());
+    ThrowIfFailed(commandList_->Reset(commandAllocator_.Get(), pipelineState_.Get()));
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = renderTargets_[frameIndex_].Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    commandList_->ResourceBarrier(1, &barrier);
+    auto rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+    rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvDescriptorSize_;
+    const auto dsv = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
+    commandList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    constexpr float clearColor[]{0.035f, 0.055f, 0.09f, 1.0f};
+    commandList_->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
+    commandList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(width_), static_cast<float>(height_), 0.0f, 1.0f};
+    const D3D12_RECT scissor{0, 0, static_cast<LONG>(width_), static_cast<LONG>(height_)};
+    commandList_->RSSetViewports(1, &viewport);
+    commandList_->RSSetScissorRects(1, &scissor);
+    commandList_->SetGraphicsRootSignature(rootSignature_.Get());
+    commandList_->SetGraphicsRootConstantBufferView(0, constantBuffer_->GetGPUVirtualAddress());
+    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
+    commandList_->DrawInstanced(36, 1, 0, 0);
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    commandList_->ResourceBarrier(1, &barrier);
+    ThrowIfFailed(commandList_->Close());
+    ID3D12CommandList* commandLists[]{commandList_.Get()};
+    commandQueue_->ExecuteCommandLists(1, commandLists);
+    ThrowIfFailed(swapChain_->Present(1, 0));
+    MoveToNextFrame();
+}
+
+void Renderer::Resize(UINT width, UINT height) {
+    WaitForGpu();
+    width_ = width;
+    height_ = height;
+    for (auto& target : renderTargets_) target.Reset();
+    depthStencil_.Reset();
+    DXGI_SWAP_CHAIN_DESC description{};
+    ThrowIfFailed(swapChain_->GetDesc(&description));
+    ThrowIfFailed(swapChain_->ResizeBuffers(kFrameCount, width, height, description.BufferDesc.Format, description.Flags));
+    auto handle = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
+    for (UINT i = 0; i < kFrameCount; ++i) {
+        ThrowIfFailed(swapChain_->GetBuffer(i, IID_PPV_ARGS(&renderTargets_[i])));
+        device_->CreateRenderTargetView(renderTargets_[i].Get(), nullptr, handle);
+        handle.ptr += rtvDescriptorSize_;
+    }
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC depthDescription{};
+    depthDescription.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depthDescription.Width = width;
+    depthDescription.Height = height;
+    depthDescription.DepthOrArraySize = 1;
+    depthDescription.MipLevels = 1;
+    depthDescription.Format = DXGI_FORMAT_D32_FLOAT;
+    depthDescription.SampleDesc.Count = 1;
+    depthDescription.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    depthDescription.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE clearValue{};
+    clearValue.Format = DXGI_FORMAT_D32_FLOAT;
+    clearValue.DepthStencil.Depth = 1.0f;
+    ThrowIfFailed(device_->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &depthDescription,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, &clearValue, IID_PPV_ARGS(&depthStencil_)));
+    device_->CreateDepthStencilView(depthStencil_.Get(), nullptr, dsvHeap_->GetCPUDescriptorHandleForHeapStart());
+    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
+}
+
+void Renderer::WaitForGpu() {
+    const UINT64 signalValue = ++fenceValue_;
+    ThrowIfFailed(commandQueue_->Signal(fence_.Get(), signalValue));
+    if (fence_->GetCompletedValue() < signalValue) {
+        ThrowIfFailed(fence_->SetEventOnCompletion(signalValue, fenceEvent_));
+        WaitForSingleObject(fenceEvent_, INFINITE);
+    }
+}
+
+void Renderer::MoveToNextFrame() {
+    const UINT64 signalValue = ++fenceValue_;
+    ThrowIfFailed(commandQueue_->Signal(fence_.Get(), signalValue));
+    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
+    if (fence_->GetCompletedValue() < signalValue) {
+        ThrowIfFailed(fence_->SetEventOnCompletion(signalValue, fenceEvent_));
+        WaitForSingleObject(fenceEvent_, INFINITE);
+    }
+}
+
+} // namespace city
