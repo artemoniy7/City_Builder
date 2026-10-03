@@ -6,6 +6,9 @@ cbuffer SceneConstants : register(b0)
     float padding;
 };
 
+Texture2D shadowMap : register(t0);
+SamplerComparisonState shadowSampler : register(s0);
+
 struct VertexInput
 {
     float3 position : POSITION;
@@ -19,6 +22,7 @@ struct PixelInput
     float3 worldPosition : POSITION0;
     float3 color         : COLOR;
     float3 normal        : NORMAL;
+    float4 shadowPosition : POSITION1;
 };
 
 PixelInput VSMain(VertexInput input)
@@ -29,13 +33,36 @@ PixelInput VSMain(VertexInput input)
     output.worldPosition = input.position;
     output.color         = input.color;
     output.normal        = input.normal;
+    output.shadowPosition = mul(worldPosition, lightViewProjection);
     return output;
+}
+
+float CalculateShadow(float4 shadowPosition)
+{
+    const float3 projected = shadowPosition.xyz / shadowPosition.w;
+    const float2 uv = projected.xy * float2(0.5f, -0.5f) + 0.5f;
+    if (any(uv < 0.0f) || any(uv > 1.0f) || projected.z <= 0.0f || projected.z >= 1.0f)
+        return 1.0f;
+
+    uint width, height;
+    shadowMap.GetDimensions(width, height);
+    const float2 texelSize = 1.0f / float2(width, height);
+    float visibility = 0.0f;
+    [unroll]
+    for (int y = -2; y <= 2; ++y)
+    {
+        [unroll]
+        for (int x = -2; x <= 2; ++x)
+            visibility += shadowMap.SampleCmpLevelZero(shadowSampler, uv + float2(x, y) * texelSize, projected.z - 0.0015f);
+    }
+    return visibility / 25.0f;
 }
 
 float4 PSMain(PixelInput input) : SV_TARGET
 {
     const float3 normal      = normalize(input.normal);
     const float  directLight = saturate(dot(normal, normalize(lightDirection)));
-    const float  lighting    = 0.28f + 0.72f * directLight;
+    const float  shadow      = CalculateShadow(input.shadowPosition);
+    const float  lighting    = 0.16f + 0.84f * directLight * shadow;
     return float4(input.color * lighting, 1.0f);
 }
