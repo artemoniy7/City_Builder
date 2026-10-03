@@ -6,6 +6,7 @@
 #include <array>
 #include <cstring>
 #include <filesystem>
+#include <numbers>
 #include <stdexcept>
 
 using Microsoft::WRL::ComPtr;
@@ -348,7 +349,8 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     if (GetAsyncKeyState('F') & 0x8000) cameraPosition_.y -= speed;
     if (GetAsyncKeyState('T') & 0x8000) cameraPitch_ += turnSpeed;
     if (GetAsyncKeyState('G') & 0x8000) cameraPitch_ -= turnSpeed;
-    cameraPitch_ = std::clamp(cameraPitch_, -1.45f, 1.45f);
+    // Keep the view between horizontal and straight down; the camera cannot look above the horizon.
+    cameraPitch_ = std::clamp(cameraPitch_, -std::numbers::pi_v<float> * 0.5f, 0.0f);
     const bool spaceDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
     if (spaceDown && !spaceWasDown_) topDownView_ = !topDownView_;
     spaceWasDown_ = spaceDown;
