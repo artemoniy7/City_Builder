@@ -52,6 +52,7 @@ private:
     std::chrono::steady_clock::time_point lastFrameAt_{std::chrono::steady_clock::now()};
     math::Vector3 cameraPosition_{0.0f, 10.0f, -16.0f};
     float cameraYaw_{0.0f};
+    float cameraPitch_{-0.576f};
     float fieldOfView_{0.95f};
     bool topDownView_{};
     bool spaceWasDown_{};

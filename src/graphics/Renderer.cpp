@@ -270,8 +270,9 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     if (GetAsyncKeyState('D') & 0x8000) cameraPosition_ = cameraPosition_ + right * speed;
     if (GetAsyncKeyState('R') & 0x8000) cameraPosition_.y += speed;
     if (GetAsyncKeyState('F') & 0x8000) cameraPosition_.y -= speed;
-    if (GetAsyncKeyState('T') & 0x8000) cameraPosition_.y += speed;
-    if (GetAsyncKeyState('G') & 0x8000) cameraPosition_.y -= speed;
+    if (GetAsyncKeyState('T') & 0x8000) cameraPitch_ += turnSpeed;
+    if (GetAsyncKeyState('G') & 0x8000) cameraPitch_ -= turnSpeed;
+    cameraPitch_ = std::clamp(cameraPitch_, -1.45f, 1.45f);
     const bool spaceDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
     if (spaceDown && !spaceWasDown_) topDownView_ = !topDownView_;
     spaceWasDown_ = spaceDown;
@@ -283,11 +284,16 @@ void Renderer::Render() {
     lastFrameAt_ = now;
     UpdateCamera(deltaSeconds);
 
-    const math::Vector3 flatForward{std::sin(cameraYaw_), 0.0f, std::cos(cameraYaw_)};
-    // Keep the normal view tilted toward the ground so the scene remains visible at launch.
+    const float horizontalLookScale = std::cos(cameraPitch_);
+    const math::Vector3 lookDirection{
+        std::sin(cameraYaw_) * horizontalLookScale,
+        std::sin(cameraPitch_),
+        std::cos(cameraYaw_) * horizontalLookScale,
+    };
+    // The initial pitch keeps the platform and cube in frame; T/G adjust it afterwards.
     const math::Vector3 target = topDownView_
         ? cameraPosition_ + math::Vector3{0.0f, -1.0f, 0.0f}
-        : cameraPosition_ + flatForward + math::Vector3{0.0f, -0.65f, 0.0f};
+        : cameraPosition_ + lookDirection;
     const math::Vector3 up = topDownView_ ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
     const auto viewProjection = math::Matrix4::Multiply(
         math::Matrix4::LookAt(cameraPosition_, target, up),
