@@ -260,7 +260,6 @@ void Renderer::CreateAssets() {
 void Renderer::UpdateCamera(float deltaSeconds) {
     const float speed = 8.0f * deltaSeconds;
     const float turnSpeed = 1.5f * deltaSeconds;
-    const float fovSpeed = 0.65f * deltaSeconds;
     if (GetAsyncKeyState('Q') & 0x8000) cameraYaw_ -= turnSpeed;
     if (GetAsyncKeyState('E') & 0x8000) cameraYaw_ += turnSpeed;
     const math::Vector3 forward{std::sin(cameraYaw_), 0.0f, std::cos(cameraYaw_)};
@@ -271,8 +270,8 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     if (GetAsyncKeyState('D') & 0x8000) cameraPosition_ = cameraPosition_ + right * speed;
     if (GetAsyncKeyState('R') & 0x8000) cameraPosition_.y += speed;
     if (GetAsyncKeyState('F') & 0x8000) cameraPosition_.y -= speed;
-    if (GetAsyncKeyState('T') & 0x8000) fieldOfView_ = std::min(fieldOfView_ + fovSpeed, 1.75f);
-    if (GetAsyncKeyState('G') & 0x8000) fieldOfView_ = std::max(fieldOfView_ - fovSpeed, 0.35f);
+    if (GetAsyncKeyState('T') & 0x8000) cameraPosition_.y += speed;
+    if (GetAsyncKeyState('G') & 0x8000) cameraPosition_.y -= speed;
     const bool spaceDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
     if (spaceDown && !spaceWasDown_) topDownView_ = !topDownView_;
     spaceWasDown_ = spaceDown;
