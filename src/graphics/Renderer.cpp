@@ -9,11 +9,27 @@
 #include <filesystem>
 #include <numbers>
 #include <stdexcept>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
 namespace {
-constexpr UINT kSceneVertexCount = 42;
+
+float TerrainHeight(float x, float z) {
+    const float rollingHills = 7.0f * std::sin(x * 0.018f) * std::cos(z * 0.015f);
+    const float ridge = 18.0f * std::sin((x + z) * 0.008f) * std::sin((x - z) * 0.006f);
+    const float mountainDistance = (x - 210.0f) * (x - 210.0f) + (z - 170.0f) * (z - 170.0f);
+    const float mountainBase = std::exp(-(210.0f * 210.0f + 170.0f * 170.0f) / 28000.0f);
+    const float mountain = 115.0f * (std::exp(-mountainDistance / 28000.0f) - mountainBase);
+    return rollingHills + ridge + mountain;
+}
+
+city::math::Vector3 TerrainNormal(float x, float z) {
+    constexpr float sampleDistance = 2.0f;
+    const float dx = TerrainHeight(x + sampleDistance, z) - TerrainHeight(x - sampleDistance, z);
+    const float dz = TerrainHeight(x, z + sampleDistance) - TerrainHeight(x, z - sampleDistance);
+    return city::math::Normalize({-dx, sampleDistance * 2.0f, -dz});
+}
 
 std::filesystem::path ShaderPath() {
     std::array<wchar_t, MAX_PATH> executablePath{};
@@ -284,7 +300,8 @@ void Renderer::CreateAssets() {
     device_->CreateShaderResourceView(shadowMap_.Get(), &shadowSrvDescription, shaderResourceHeap_->GetCPUDescriptorHandleForHeapStart());
 
     // ---------- Geometry ----------
-    constexpr std::array<Vertex, kSceneVertexCount> vertices{{
+    std::vector<Vertex> vertices{
+        // Cube, resting on the platform at y = -1.
         {{-1,0,-1},{1,0,0},{0,0,-1}}, {{-1,2,-1},{1,0,0},{0,0,-1}}, {{ 1,2,-1},{1,0,0},{0,0,-1}},
         {{-1,0,-1},{1,0,0},{0,0,-1}}, {{ 1,2,-1},{1,0,0},{0,0,-1}}, {{ 1,0,-1},{1,0,0},{0,0,-1}},
         {{ 1,0, 1},{0,1,0},{0,0, 1}}, {{ 1,2, 1},{0,1,0},{0,0, 1}}, {{-1,2, 1},{0,1,0},{0,0, 1}},
@@ -297,9 +314,32 @@ void Renderer::CreateAssets() {
         {{-1,2,-1},{1,0,1},{0, 1,0}}, {{ 1,2, 1},{1,0,1},{0, 1,0}}, {{ 1,2,-1},{1,0,1},{0, 1,0}},
         {{-1,0, 1},{0,1,1},{0,-1,0}}, {{-1,0,-1},{0,1,1},{0,-1,0}}, {{ 1,0,-1},{0,1,1},{0,-1,0}},
         {{-1,0, 1},{0,1,1},{0,-1,0}}, {{ 1,0,-1},{0,1,1},{0,-1,0}}, {{ 1,0, 1},{0,1,1},{0,-1,0}},
-        {{-14,-1,-14},{0.18f,0.62f,0.24f},{0,1,0}}, {{-14,-1, 14},{0.18f,0.62f,0.24f},{0,1,0}}, {{ 14,-1, 14},{0.18f,0.62f,0.24f},{0,1,0}},
-        {{-14,-1,-14},{0.18f,0.62f,0.24f},{0,1,0}}, {{ 14,-1, 14},{0.18f,0.62f,0.24f},{0,1,0}}, {{ 14,-1,-14},{0.18f,0.62f,0.24f},{0,1,0}},
-    }};
+    };
+
+    constexpr float terrainSize = 1000.0f;
+    const float cellSize = terrainSize / kTerrainResolution;
+    const auto appendTerrainVertex = [&vertices](float x, float z) {
+        const float height = TerrainHeight(x, z);
+        const auto normal = TerrainNormal(x, z);
+        const float slope = 1.0f - normal.y;
+        const std::array<float, 3> color = height < -6.0f ? std::array<float, 3>{0.76f, 0.67f, 0.35f}
+            : (slope > 0.22f || height > 55.0f) ? std::array<float, 3>{0.42f, 0.43f, 0.40f}
+            : (slope > 0.10f) ? std::array<float, 3>{0.38f, 0.24f, 0.13f}
+            : std::array<float, 3>{0.20f, 0.55f, 0.22f};
+        vertices.push_back({{x, height, z}, {color[0], color[1], color[2]}, {normal.x, normal.y, normal.z}});
+    };
+    vertices.reserve(vertices.size() + kTerrainResolution * kTerrainResolution * 6);
+    for (UINT z = 0; z < kTerrainResolution; ++z) {
+        for (UINT x = 0; x < kTerrainResolution; ++x) {
+            const float x0 = -terrainSize * 0.5f + x * cellSize;
+            const float z0 = -terrainSize * 0.5f + z * cellSize;
+            const float x1 = x0 + cellSize;
+            const float z1 = z0 + cellSize;
+            appendTerrainVertex(x0, z0); appendTerrainVertex(x0, z1); appendTerrainVertex(x1, z1);
+            appendTerrainVertex(x0, z0); appendTerrainVertex(x1, z1); appendTerrainVertex(x1, z0);
+        }
+    }
+    vertexCount_ = static_cast<UINT>(vertices.size());
 
     const UINT bufferSize = static_cast<UINT>(vertices.size() * sizeof(Vertex));
     D3D12_HEAP_PROPERTIES uploadHeap{};
@@ -348,6 +388,7 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     if (GetAsyncKeyState('F') & 0x8000) cameraPosition_.y -= speed;
     if (GetAsyncKeyState('T') & 0x8000) cameraPitch_ += turnSpeed;
     if (GetAsyncKeyState('G') & 0x8000) cameraPitch_ -= turnSpeed;
+    // Keep the view between horizontal and straight down; the camera cannot look above the horizon.
     cameraPitch_ = std::clamp(cameraPitch_, -std::numbers::pi_v<float> * 0.5f, 0.0f);
     const bool spaceDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
     if (spaceDown && !spaceWasDown_) topDownView_ = !topDownView_;
@@ -366,14 +407,14 @@ void Renderer::Render() {
         std::sin(cameraPitch_),
         std::cos(cameraYaw_) * horizontalLookScale,
     };
-    const math::Vector3 target = cameraPosition_ + lookDirection;
-
-    // up = cross(lookDirection, right) — всегда перпендикулярен lookDirection,
-    // поэтому LookAt не вырождается ни при каком pitch. При pitch = 0 даёт {0, 1, 0},
-    // при pitch = -π/2 — горизонтальный вектор {sin(yaw), 0, cos(yaw)}. Переход плавный.
-    const math::Vector3 right{std::cos(cameraYaw_), 0.0f, -std::sin(cameraYaw_)};
-    const math::Vector3 up = math::Normalize(math::Cross(lookDirection, right));
-
+    // The initial pitch keeps the platform and cube in frame; T/G adjust it afterwards.
+    const math::Vector3 target = topDownView_
+        ? cameraPosition_ + math::Vector3{0.0f, -1.0f, 0.0f}
+        : cameraPosition_ + lookDirection;
+    // A downward-facing camera needs a horizontal up vector. Deriving it from yaw keeps Q/E rotating the view.
+    const bool useYawBasedUp = topDownView_ || std::abs(lookDirection.y) > 0.99f;
+    const math::Vector3 yawBasedUp{-std::cos(cameraYaw_), 0.0f, std::sin(cameraYaw_)};
+    const math::Vector3 up = useYawBasedUp ? yawBasedUp : math::Vector3{0.0f, 1.0f, 0.0f};
     const auto viewProjection = math::Matrix4::Multiply(
         math::Matrix4::LookAt(cameraPosition_, target, up),
         math::Matrix4::Perspective(fieldOfView_, static_cast<float>(width_) / height_, 0.1f, 100.0f));
@@ -394,6 +435,7 @@ void Renderer::Render() {
     ThrowIfFailed(commandAllocator_->Reset());
     ThrowIfFailed(commandList_->Reset(commandAllocator_.Get(), pipelineState_.Get()));
 
+    // First render the scene from the fixed sun position into a high-resolution depth map.
     const D3D12_VIEWPORT shadowViewport{0.0f, 0.0f, static_cast<float>(kShadowMapSize), static_cast<float>(kShadowMapSize), 0.0f, 1.0f};
     const D3D12_RECT shadowScissor{0, 0, static_cast<LONG>(kShadowMapSize), static_cast<LONG>(kShadowMapSize)};
     const auto shadowDsv = shadowDsvHeap_->GetCPUDescriptorHandleForHeapStart();
@@ -406,7 +448,7 @@ void Renderer::Render() {
     commandList_->SetGraphicsRootConstantBufferView(0, constantBuffer_->GetGPUVirtualAddress());
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
-    commandList_->DrawInstanced(kSceneVertexCount, 1, 0, 0);
+    commandList_->DrawInstanced(vertexCount_, 1, 0, 0);
 
     D3D12_RESOURCE_BARRIER shadowBarrier{};
     shadowBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -446,7 +488,7 @@ void Renderer::Render() {
     commandList_->SetGraphicsRootDescriptorTable(1, shaderResourceHeap_->GetGPUDescriptorHandleForHeapStart());
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
-    commandList_->DrawInstanced(kSceneVertexCount, 1, 0, 0);
+    commandList_->DrawInstanced(vertexCount_, 1, 0, 0);
 
     shadowBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     shadowBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
