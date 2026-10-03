@@ -17,5 +17,7 @@ add_custom_command(TARGET CityBuilder POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/Cube.hlsl"
         "$<TARGET_FILE_DIR:CityBuilder>/shaders/Cube.hlsl"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/Shadow.hlsl"
+        "$<TARGET_FILE_DIR:CityBuilder>/shaders/Shadow.hlsl"
 )
-

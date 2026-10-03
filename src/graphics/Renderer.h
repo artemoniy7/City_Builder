@@ -26,6 +26,7 @@ public:
 
 private:
     static constexpr UINT kFrameCount = 2;
+    static constexpr UINT kShadowMapSize = 2048;
 
     struct Vertex { float position[3]; float color[3]; float normal[3]; };
     struct alignas(256) SceneConstants {
