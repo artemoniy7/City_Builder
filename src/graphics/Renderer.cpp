@@ -11,7 +11,7 @@
 using Microsoft::WRL::ComPtr;
 
 namespace {
-constexpr UINT kCubeVertexCount = 36;
+constexpr UINT kSceneVertexCount = 42;
 
 std::filesystem::path ShaderPath() {
     std::array<wchar_t, MAX_PATH> executablePath{};
@@ -206,19 +206,23 @@ void Renderer::CreateAssets() {
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pipelineDescription, IID_PPV_ARGS(&pipelineState_)));
 
     // ---------- Geometry ----------
-    constexpr std::array<Vertex, 36> vertices{{
-        {{-1,-1,-1},{1,0,0},{0,0,-1}}, {{-1, 1,-1},{1,0,0},{0,0,-1}}, {{ 1, 1,-1},{1,0,0},{0,0,-1}},
-        {{-1,-1,-1},{1,0,0},{0,0,-1}}, {{ 1, 1,-1},{1,0,0},{0,0,-1}}, {{ 1,-1,-1},{1,0,0},{0,0,-1}},
-        {{ 1,-1, 1},{0,1,0},{0,0, 1}}, {{ 1, 1, 1},{0,1,0},{0,0, 1}}, {{-1, 1, 1},{0,1,0},{0,0, 1}},
-        {{ 1,-1, 1},{0,1,0},{0,0, 1}}, {{-1, 1, 1},{0,1,0},{0,0, 1}}, {{-1,-1, 1},{0,1,0},{0,0, 1}},
-        {{-1,-1, 1},{0,0,1},{-1,0,0}}, {{-1, 1, 1},{0,0,1},{-1,0,0}}, {{-1, 1,-1},{0,0,1},{-1,0,0}},
-        {{-1,-1, 1},{0,0,1},{-1,0,0}}, {{-1, 1,-1},{0,0,1},{-1,0,0}}, {{-1,-1,-1},{0,0,1},{-1,0,0}},
-        {{ 1,-1,-1},{1,1,0},{ 1,0,0}}, {{ 1, 1,-1},{1,1,0},{ 1,0,0}}, {{ 1, 1, 1},{1,1,0},{ 1,0,0}},
-        {{ 1,-1,-1},{1,1,0},{ 1,0,0}}, {{ 1, 1, 1},{1,1,0},{ 1,0,0}}, {{ 1,-1, 1},{1,1,0},{ 1,0,0}},
-        {{-1, 1,-1},{1,0,1},{0, 1,0}}, {{-1, 1, 1},{1,0,1},{0, 1,0}}, {{ 1, 1, 1},{1,0,1},{0, 1,0}},
-        {{-1, 1,-1},{1,0,1},{0, 1,0}}, {{ 1, 1, 1},{1,0,1},{0, 1,0}}, {{ 1, 1,-1},{1,0,1},{0, 1,0}},
-        {{-1,-1, 1},{0,1,1},{0,-1,0}}, {{-1,-1,-1},{0,1,1},{0,-1,0}}, {{ 1,-1,-1},{0,1,1},{0,-1,0}},
-        {{-1,-1, 1},{0,1,1},{0,-1,0}}, {{ 1,-1,-1},{0,1,1},{0,-1,0}}, {{ 1,-1, 1},{0,1,1},{0,-1,0}},
+    constexpr std::array<Vertex, kSceneVertexCount> vertices{{
+        // Cube, resting on the platform at y = -1.
+        {{-1,0,-1},{1,0,0},{0,0,-1}}, {{-1,2,-1},{1,0,0},{0,0,-1}}, {{ 1,2,-1},{1,0,0},{0,0,-1}},
+        {{-1,0,-1},{1,0,0},{0,0,-1}}, {{ 1,2,-1},{1,0,0},{0,0,-1}}, {{ 1,0,-1},{1,0,0},{0,0,-1}},
+        {{ 1,0, 1},{0,1,0},{0,0, 1}}, {{ 1,2, 1},{0,1,0},{0,0, 1}}, {{-1,2, 1},{0,1,0},{0,0, 1}},
+        {{ 1,0, 1},{0,1,0},{0,0, 1}}, {{-1,2, 1},{0,1,0},{0,0, 1}}, {{-1,0, 1},{0,1,0},{0,0, 1}},
+        {{-1,0, 1},{0,0,1},{-1,0,0}}, {{-1,2, 1},{0,0,1},{-1,0,0}}, {{-1,2,-1},{0,0,1},{-1,0,0}},
+        {{-1,0, 1},{0,0,1},{-1,0,0}}, {{-1,2,-1},{0,0,1},{-1,0,0}}, {{-1,0,-1},{0,0,1},{-1,0,0}},
+        {{ 1,0,-1},{1,1,0},{ 1,0,0}}, {{ 1,2,-1},{1,1,0},{ 1,0,0}}, {{ 1,2, 1},{1,1,0},{ 1,0,0}},
+        {{ 1,0,-1},{1,1,0},{ 1,0,0}}, {{ 1,2, 1},{1,1,0},{ 1,0,0}}, {{ 1,0, 1},{1,1,0},{ 1,0,0}},
+        {{-1,2,-1},{1,0,1},{0, 1,0}}, {{-1,2, 1},{1,0,1},{0, 1,0}}, {{ 1,2, 1},{1,0,1},{0, 1,0}},
+        {{-1,2,-1},{1,0,1},{0, 1,0}}, {{ 1,2, 1},{1,0,1},{0, 1,0}}, {{ 1,2,-1},{1,0,1},{0, 1,0}},
+        {{-1,0, 1},{0,1,1},{0,-1,0}}, {{-1,0,-1},{0,1,1},{0,-1,0}}, {{ 1,0,-1},{0,1,1},{0,-1,0}},
+        {{-1,0, 1},{0,1,1},{0,-1,0}}, {{ 1,0,-1},{0,1,1},{0,-1,0}}, {{ 1,0, 1},{0,1,1},{0,-1,0}},
+        // A large, horizontal platform below the cube.
+        {{-14,-1,-14},{0.18f,0.62f,0.24f},{0,1,0}}, {{-14,-1, 14},{0.18f,0.62f,0.24f},{0,1,0}}, {{ 14,-1, 14},{0.18f,0.62f,0.24f},{0,1,0}},
+        {{-14,-1,-14},{0.18f,0.62f,0.24f},{0,1,0}}, {{ 14,-1, 14},{0.18f,0.62f,0.24f},{0,1,0}}, {{ 14,-1,-14},{0.18f,0.62f,0.24f},{0,1,0}},
     }};
 
     const UINT bufferSize = static_cast<UINT>(vertices.size() * sizeof(Vertex));
@@ -256,7 +260,6 @@ void Renderer::CreateAssets() {
 void Renderer::UpdateCamera(float deltaSeconds) {
     const float speed = 8.0f * deltaSeconds;
     const float turnSpeed = 1.5f * deltaSeconds;
-    const float fovSpeed = 0.65f * deltaSeconds;
     if (GetAsyncKeyState('Q') & 0x8000) cameraYaw_ -= turnSpeed;
     if (GetAsyncKeyState('E') & 0x8000) cameraYaw_ += turnSpeed;
     const math::Vector3 forward{std::sin(cameraYaw_), 0.0f, std::cos(cameraYaw_)};
@@ -267,8 +270,8 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     if (GetAsyncKeyState('D') & 0x8000) cameraPosition_ = cameraPosition_ + right * speed;
     if (GetAsyncKeyState('R') & 0x8000) cameraPosition_.y += speed;
     if (GetAsyncKeyState('F') & 0x8000) cameraPosition_.y -= speed;
-    if (GetAsyncKeyState('T') & 0x8000) fieldOfView_ = std::min(fieldOfView_ + fovSpeed, 1.75f);
-    if (GetAsyncKeyState('G') & 0x8000) fieldOfView_ = std::max(fieldOfView_ - fovSpeed, 0.35f);
+    if (GetAsyncKeyState('T') & 0x8000) cameraPosition_.y += speed;
+    if (GetAsyncKeyState('G') & 0x8000) cameraPosition_.y -= speed;
     const bool spaceDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
     if (spaceDown && !spaceWasDown_) topDownView_ = !topDownView_;
     spaceWasDown_ = spaceDown;
@@ -281,7 +284,10 @@ void Renderer::Render() {
     UpdateCamera(deltaSeconds);
 
     const math::Vector3 flatForward{std::sin(cameraYaw_), 0.0f, std::cos(cameraYaw_)};
-    const math::Vector3 target = topDownView_ ? cameraPosition_ + math::Vector3{0.0f, -1.0f, 0.0f} : cameraPosition_ + flatForward;
+    // Keep the normal view tilted toward the ground so the scene remains visible at launch.
+    const math::Vector3 target = topDownView_
+        ? cameraPosition_ + math::Vector3{0.0f, -1.0f, 0.0f}
+        : cameraPosition_ + flatForward + math::Vector3{0.0f, -0.65f, 0.0f};
     const math::Vector3 up = topDownView_ ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
     const auto viewProjection = math::Matrix4::Multiply(
         math::Matrix4::LookAt(cameraPosition_, target, up),
@@ -330,7 +336,7 @@ void Renderer::Render() {
     commandList_->SetGraphicsRootConstantBufferView(0, constantBuffer_->GetGPUVirtualAddress());
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
-    commandList_->DrawInstanced(kCubeVertexCount, 1, 0, 0);
+    commandList_->DrawInstanced(kSceneVertexCount, 1, 0, 0);
 
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
