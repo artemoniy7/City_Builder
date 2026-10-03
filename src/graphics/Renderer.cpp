@@ -373,9 +373,10 @@ void Renderer::Render() {
     const math::Vector3 target = topDownView_
         ? cameraPosition_ + math::Vector3{0.0f, -1.0f, 0.0f}
         : cameraPosition_ + lookDirection;
-    // The world Y axis is parallel to a straight-down view direction, so use Z as the up axis there.
-    const bool useTopDownUp = topDownView_ || std::abs(lookDirection.y) > 0.99f;
-    const math::Vector3 up = useTopDownUp ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
+    // A downward-facing camera needs a horizontal up vector. Deriving it from yaw keeps Q/E rotating the view.
+    const bool useYawBasedUp = topDownView_ || std::abs(lookDirection.y) > 0.99f;
+    const math::Vector3 yawBasedUp{-std::cos(cameraYaw_), 0.0f, std::sin(cameraYaw_)};
+    const math::Vector3 up = useYawBasedUp ? yawBasedUp : math::Vector3{0.0f, 1.0f, 0.0f};
     const auto viewProjection = math::Matrix4::Multiply(
         math::Matrix4::LookAt(cameraPosition_, target, up),
         math::Matrix4::Perspective(fieldOfView_, static_cast<float>(width_) / height_, 0.1f, 100.0f));
