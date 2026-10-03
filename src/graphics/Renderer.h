@@ -26,6 +26,8 @@ public:
 
 private:
     static constexpr UINT kFrameCount = 2;
+    static constexpr UINT kShadowMapSize = 2048;
+    static constexpr UINT kTerrainResolution = 128;
 
     struct Vertex { float position[3]; float color[3]; float normal[3]; };
     struct alignas(256) SceneConstants {
@@ -50,10 +52,11 @@ private:
     UINT rtvDescriptorSize_{};
     UINT64 fenceValue_{};
     std::chrono::steady_clock::time_point lastFrameAt_{std::chrono::steady_clock::now()};
-    math::Vector3 cameraPosition_{0.0f, 13.0f, -10.0f};
+    math::Vector3 cameraPosition_{0.0f, 10.0f, -16.0f};
     float cameraYaw_{0.0f};
+    float cameraPitch_{-0.576f};
     float fieldOfView_{0.95f};
-    bool topDownView_{true};
+    bool topDownView_{};
     bool spaceWasDown_{};
 
     Microsoft::WRL::ComPtr<IDXGIFactory6> factory_;
@@ -75,6 +78,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> constantBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> shadowMap_;
     D3D12_VERTEX_BUFFER_VIEW vertexBufferView_{};
+    UINT vertexCount_{};
     SceneConstants* mappedConstants_{};
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
     HANDLE fenceEvent_{};

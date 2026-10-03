@@ -4,19 +4,43 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <numbers>
 #include <stdexcept>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
 namespace {
-constexpr UINT kCubeVertexCount = 36;
+
+float TerrainHeight(float x, float z) {
+    const float rollingHills = 7.0f * std::sin(x * 0.018f) * std::cos(z * 0.015f);
+    const float ridge = 18.0f * std::sin((x + z) * 0.008f) * std::sin((x - z) * 0.006f);
+    const float mountainDistance = (x - 210.0f) * (x - 210.0f) + (z - 170.0f) * (z - 170.0f);
+    const float mountainBase = std::exp(-(210.0f * 210.0f + 170.0f * 170.0f) / 28000.0f);
+    const float mountain = 115.0f * (std::exp(-mountainDistance / 28000.0f) - mountainBase);
+    return rollingHills + ridge + mountain;
+}
+
+city::math::Vector3 TerrainNormal(float x, float z) {
+    constexpr float sampleDistance = 2.0f;
+    const float dx = TerrainHeight(x + sampleDistance, z) - TerrainHeight(x - sampleDistance, z);
+    const float dz = TerrainHeight(x, z + sampleDistance) - TerrainHeight(x, z - sampleDistance);
+    return city::math::Normalize({-dx, sampleDistance * 2.0f, -dz});
+}
 
 std::filesystem::path ShaderPath() {
     std::array<wchar_t, MAX_PATH> executablePath{};
     GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size()));
     return std::filesystem::path(executablePath.data()).parent_path() / L"shaders" / L"Cube.hlsl";
+}
+
+std::filesystem::path ShadowShaderPath() {
+    std::array<wchar_t, MAX_PATH> executablePath{};
+    GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size()));
+    return std::filesystem::path(executablePath.data()).parent_path() / L"shaders" / L"Shadow.hlsl";
 }
 } // namespace
 
@@ -117,14 +141,34 @@ void Renderer::CreateWindowResources(UINT width, UINT height) {
 
 void Renderer::CreateAssets() {
     // ---------- Root signature ----------
-    D3D12_ROOT_PARAMETER rootParameter{};
-    rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    rootParameter.Descriptor.ShaderRegister = 0;
-    rootParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;   // ← b0 виден и VS, и PS
+    D3D12_ROOT_PARAMETER rootParameters[2]{};
+    rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParameters[0].Descriptor.ShaderRegister = 0;
+    rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_DESCRIPTOR_RANGE shadowMapRange{};
+    shadowMapRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    shadowMapRange.NumDescriptors = 1;
+    shadowMapRange.BaseShaderRegister = 0;
+    shadowMapRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[1].DescriptorTable.NumDescriptorRanges = 1;
+    rootParameters[1].DescriptorTable.pDescriptorRanges = &shadowMapRange;
+    rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC shadowSampler{};
+    shadowSampler.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+    shadowSampler.AddressU = shadowSampler.AddressV = shadowSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    shadowSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    shadowSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+    shadowSampler.MaxLOD = D3D12_FLOAT32_MAX;
+    shadowSampler.ShaderRegister = 0;
+    shadowSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC rootSignatureDescription{};
-    rootSignatureDescription.NumParameters = 1;
-    rootSignatureDescription.pParameters = &rootParameter;
+    rootSignatureDescription.NumParameters = 2;
+    rootSignatureDescription.pParameters = rootParameters;
+    rootSignatureDescription.NumStaticSamplers = 1;
+    rootSignatureDescription.pStaticSamplers = &shadowSampler;
     rootSignatureDescription.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     ComPtr<ID3DBlob> serializedRootSignature;
@@ -137,11 +181,15 @@ void Renderer::CreateAssets() {
     // ---------- Shaders ----------
     ComPtr<ID3DBlob> vertexShader;
     ComPtr<ID3DBlob> pixelShader;
+    ComPtr<ID3DBlob> shadowVertexShader;
     const auto shaderPath = ShaderPath();
     ThrowIfFailed(D3DCompileFromFile(shaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VSMain", "vs_5_0",
         D3DCOMPILE_ENABLE_STRICTNESS, 0, &vertexShader, &errors));
     ThrowIfFailed(D3DCompileFromFile(shaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PSMain", "ps_5_0",
         D3DCOMPILE_ENABLE_STRICTNESS, 0, &pixelShader, &errors));
+    const auto shadowShaderPath = ShadowShaderPath();
+    ThrowIfFailed(D3DCompileFromFile(shadowShaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "ShadowVS", "vs_5_0",
+        D3DCOMPILE_ENABLE_STRICTNESS, 0, &shadowVertexShader, &errors));
 
     // ---------- Input layout ----------
     const std::array<D3D12_INPUT_ELEMENT_DESC, 3> inputLayout{{
@@ -205,21 +253,93 @@ void Renderer::CreateAssets() {
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pipelineDescription, IID_PPV_ARGS(&pipelineState_)));
 
+    auto shadowPipelineDescription = pipelineDescription;
+    shadowPipelineDescription.VS = {shadowVertexShader->GetBufferPointer(), shadowVertexShader->GetBufferSize()};
+    shadowPipelineDescription.PS = {};
+    shadowPipelineDescription.NumRenderTargets = 0;
+    shadowPipelineDescription.RTVFormats[0] = DXGI_FORMAT_UNKNOWN;
+    shadowPipelineDescription.RasterizerState.DepthBias = 1000;
+    shadowPipelineDescription.RasterizerState.SlopeScaledDepthBias = 1.5f;
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&shadowPipelineDescription, IID_PPV_ARGS(&shadowPipelineState_)));
+
+    D3D12_DESCRIPTOR_HEAP_DESC shadowDsvHeapDescription{};
+    shadowDsvHeapDescription.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    shadowDsvHeapDescription.NumDescriptors = 1;
+    ThrowIfFailed(device_->CreateDescriptorHeap(&shadowDsvHeapDescription, IID_PPV_ARGS(&shadowDsvHeap_)));
+    D3D12_DESCRIPTOR_HEAP_DESC shadowSrvHeapDescription{};
+    shadowSrvHeapDescription.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    shadowSrvHeapDescription.NumDescriptors = 1;
+    shadowSrvHeapDescription.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ThrowIfFailed(device_->CreateDescriptorHeap(&shadowSrvHeapDescription, IID_PPV_ARGS(&shaderResourceHeap_)));
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC shadowMapDescription{};
+    shadowMapDescription.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    shadowMapDescription.Width = kShadowMapSize;
+    shadowMapDescription.Height = kShadowMapSize;
+    shadowMapDescription.DepthOrArraySize = 1;
+    shadowMapDescription.MipLevels = 1;
+    shadowMapDescription.Format = DXGI_FORMAT_R32_TYPELESS;
+    shadowMapDescription.SampleDesc.Count = 1;
+    shadowMapDescription.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    shadowMapDescription.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE shadowClearValue{};
+    shadowClearValue.Format = DXGI_FORMAT_D32_FLOAT;
+    shadowClearValue.DepthStencil.Depth = 1.0f;
+    ThrowIfFailed(device_->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &shadowMapDescription,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, &shadowClearValue, IID_PPV_ARGS(&shadowMap_)));
+    D3D12_DEPTH_STENCIL_VIEW_DESC shadowDsvDescription{};
+    shadowDsvDescription.Format = DXGI_FORMAT_D32_FLOAT;
+    shadowDsvDescription.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    device_->CreateDepthStencilView(shadowMap_.Get(), &shadowDsvDescription, shadowDsvHeap_->GetCPUDescriptorHandleForHeapStart());
+    D3D12_SHADER_RESOURCE_VIEW_DESC shadowSrvDescription{};
+    shadowSrvDescription.Format = DXGI_FORMAT_R32_FLOAT;
+    shadowSrvDescription.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    shadowSrvDescription.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    shadowSrvDescription.Texture2D.MipLevels = 1;
+    device_->CreateShaderResourceView(shadowMap_.Get(), &shadowSrvDescription, shaderResourceHeap_->GetCPUDescriptorHandleForHeapStart());
+
     // ---------- Geometry ----------
-    constexpr std::array<Vertex, 36> vertices{{
-        {{-1,-1,-1},{1,0,0},{0,0,-1}}, {{-1, 1,-1},{1,0,0},{0,0,-1}}, {{ 1, 1,-1},{1,0,0},{0,0,-1}},
-        {{-1,-1,-1},{1,0,0},{0,0,-1}}, {{ 1, 1,-1},{1,0,0},{0,0,-1}}, {{ 1,-1,-1},{1,0,0},{0,0,-1}},
-        {{ 1,-1, 1},{0,1,0},{0,0, 1}}, {{ 1, 1, 1},{0,1,0},{0,0, 1}}, {{-1, 1, 1},{0,1,0},{0,0, 1}},
-        {{ 1,-1, 1},{0,1,0},{0,0, 1}}, {{-1, 1, 1},{0,1,0},{0,0, 1}}, {{-1,-1, 1},{0,1,0},{0,0, 1}},
-        {{-1,-1, 1},{0,0,1},{-1,0,0}}, {{-1, 1, 1},{0,0,1},{-1,0,0}}, {{-1, 1,-1},{0,0,1},{-1,0,0}},
-        {{-1,-1, 1},{0,0,1},{-1,0,0}}, {{-1, 1,-1},{0,0,1},{-1,0,0}}, {{-1,-1,-1},{0,0,1},{-1,0,0}},
-        {{ 1,-1,-1},{1,1,0},{ 1,0,0}}, {{ 1, 1,-1},{1,1,0},{ 1,0,0}}, {{ 1, 1, 1},{1,1,0},{ 1,0,0}},
-        {{ 1,-1,-1},{1,1,0},{ 1,0,0}}, {{ 1, 1, 1},{1,1,0},{ 1,0,0}}, {{ 1,-1, 1},{1,1,0},{ 1,0,0}},
-        {{-1, 1,-1},{1,0,1},{0, 1,0}}, {{-1, 1, 1},{1,0,1},{0, 1,0}}, {{ 1, 1, 1},{1,0,1},{0, 1,0}},
-        {{-1, 1,-1},{1,0,1},{0, 1,0}}, {{ 1, 1, 1},{1,0,1},{0, 1,0}}, {{ 1, 1,-1},{1,0,1},{0, 1,0}},
-        {{-1,-1, 1},{0,1,1},{0,-1,0}}, {{-1,-1,-1},{0,1,1},{0,-1,0}}, {{ 1,-1,-1},{0,1,1},{0,-1,0}},
-        {{-1,-1, 1},{0,1,1},{0,-1,0}}, {{ 1,-1,-1},{0,1,1},{0,-1,0}}, {{ 1,-1, 1},{0,1,1},{0,-1,0}},
-    }};
+    std::vector<Vertex> vertices{
+        // Cube, resting on the platform at y = -1.
+        {{-1,0,-1},{1,0,0},{0,0,-1}}, {{-1,2,-1},{1,0,0},{0,0,-1}}, {{ 1,2,-1},{1,0,0},{0,0,-1}},
+        {{-1,0,-1},{1,0,0},{0,0,-1}}, {{ 1,2,-1},{1,0,0},{0,0,-1}}, {{ 1,0,-1},{1,0,0},{0,0,-1}},
+        {{ 1,0, 1},{0,1,0},{0,0, 1}}, {{ 1,2, 1},{0,1,0},{0,0, 1}}, {{-1,2, 1},{0,1,0},{0,0, 1}},
+        {{ 1,0, 1},{0,1,0},{0,0, 1}}, {{-1,2, 1},{0,1,0},{0,0, 1}}, {{-1,0, 1},{0,1,0},{0,0, 1}},
+        {{-1,0, 1},{0,0,1},{-1,0,0}}, {{-1,2, 1},{0,0,1},{-1,0,0}}, {{-1,2,-1},{0,0,1},{-1,0,0}},
+        {{-1,0, 1},{0,0,1},{-1,0,0}}, {{-1,2,-1},{0,0,1},{-1,0,0}}, {{-1,0,-1},{0,0,1},{-1,0,0}},
+        {{ 1,0,-1},{1,1,0},{ 1,0,0}}, {{ 1,2,-1},{1,1,0},{ 1,0,0}}, {{ 1,2, 1},{1,1,0},{ 1,0,0}},
+        {{ 1,0,-1},{1,1,0},{ 1,0,0}}, {{ 1,2, 1},{1,1,0},{ 1,0,0}}, {{ 1,0, 1},{1,1,0},{ 1,0,0}},
+        {{-1,2,-1},{1,0,1},{0, 1,0}}, {{-1,2, 1},{1,0,1},{0, 1,0}}, {{ 1,2, 1},{1,0,1},{0, 1,0}},
+        {{-1,2,-1},{1,0,1},{0, 1,0}}, {{ 1,2, 1},{1,0,1},{0, 1,0}}, {{ 1,2,-1},{1,0,1},{0, 1,0}},
+        {{-1,0, 1},{0,1,1},{0,-1,0}}, {{-1,0,-1},{0,1,1},{0,-1,0}}, {{ 1,0,-1},{0,1,1},{0,-1,0}},
+        {{-1,0, 1},{0,1,1},{0,-1,0}}, {{ 1,0,-1},{0,1,1},{0,-1,0}}, {{ 1,0, 1},{0,1,1},{0,-1,0}},
+    };
+
+    constexpr float terrainSize = 1000.0f;
+    const float cellSize = terrainSize / kTerrainResolution;
+    const auto appendTerrainVertex = [&vertices](float x, float z) {
+        const float height = TerrainHeight(x, z);
+        const auto normal = TerrainNormal(x, z);
+        const float slope = 1.0f - normal.y;
+        const std::array<float, 3> color = height < -6.0f ? std::array<float, 3>{0.76f, 0.67f, 0.35f}
+            : (slope > 0.22f || height > 55.0f) ? std::array<float, 3>{0.42f, 0.43f, 0.40f}
+            : (slope > 0.10f) ? std::array<float, 3>{0.38f, 0.24f, 0.13f}
+            : std::array<float, 3>{0.20f, 0.55f, 0.22f};
+        vertices.push_back({{x, height, z}, {color[0], color[1], color[2]}, {normal.x, normal.y, normal.z}});
+    };
+    vertices.reserve(vertices.size() + kTerrainResolution * kTerrainResolution * 6);
+    for (UINT z = 0; z < kTerrainResolution; ++z) {
+        for (UINT x = 0; x < kTerrainResolution; ++x) {
+            const float x0 = -terrainSize * 0.5f + x * cellSize;
+            const float z0 = -terrainSize * 0.5f + z * cellSize;
+            const float x1 = x0 + cellSize;
+            const float z1 = z0 + cellSize;
+            appendTerrainVertex(x0, z0); appendTerrainVertex(x0, z1); appendTerrainVertex(x1, z1);
+            appendTerrainVertex(x0, z0); appendTerrainVertex(x1, z1); appendTerrainVertex(x1, z0);
+        }
+    }
+    vertexCount_ = static_cast<UINT>(vertices.size());
 
     const UINT bufferSize = static_cast<UINT>(vertices.size() * sizeof(Vertex));
     D3D12_HEAP_PROPERTIES uploadHeap{};
@@ -256,7 +376,6 @@ void Renderer::CreateAssets() {
 void Renderer::UpdateCamera(float deltaSeconds) {
     const float speed = 8.0f * deltaSeconds;
     const float turnSpeed = 1.5f * deltaSeconds;
-    const float fovSpeed = 0.65f * deltaSeconds;
     if (GetAsyncKeyState('Q') & 0x8000) cameraYaw_ -= turnSpeed;
     if (GetAsyncKeyState('E') & 0x8000) cameraYaw_ += turnSpeed;
     const math::Vector3 forward{std::sin(cameraYaw_), 0.0f, std::cos(cameraYaw_)};
@@ -267,8 +386,10 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     if (GetAsyncKeyState('D') & 0x8000) cameraPosition_ = cameraPosition_ + right * speed;
     if (GetAsyncKeyState('R') & 0x8000) cameraPosition_.y += speed;
     if (GetAsyncKeyState('F') & 0x8000) cameraPosition_.y -= speed;
-    if (GetAsyncKeyState('T') & 0x8000) fieldOfView_ = std::min(fieldOfView_ + fovSpeed, 1.75f);
-    if (GetAsyncKeyState('G') & 0x8000) fieldOfView_ = std::max(fieldOfView_ - fovSpeed, 0.35f);
+    if (GetAsyncKeyState('T') & 0x8000) cameraPitch_ += turnSpeed;
+    if (GetAsyncKeyState('G') & 0x8000) cameraPitch_ -= turnSpeed;
+    // Keep the view between horizontal and straight down; the camera cannot look above the horizon.
+    cameraPitch_ = std::clamp(cameraPitch_, -std::numbers::pi_v<float> * 0.5f, 0.0f);
     const bool spaceDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
     if (spaceDown && !spaceWasDown_) topDownView_ = !topDownView_;
     spaceWasDown_ = spaceDown;
@@ -280,9 +401,20 @@ void Renderer::Render() {
     lastFrameAt_ = now;
     UpdateCamera(deltaSeconds);
 
-    const math::Vector3 flatForward{std::sin(cameraYaw_), 0.0f, std::cos(cameraYaw_)};
-    const math::Vector3 target = topDownView_ ? cameraPosition_ + math::Vector3{0.0f, -1.0f, 0.0f} : cameraPosition_ + flatForward;
-    const math::Vector3 up = topDownView_ ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
+    const float horizontalLookScale = std::cos(cameraPitch_);
+    const math::Vector3 lookDirection{
+        std::sin(cameraYaw_) * horizontalLookScale,
+        std::sin(cameraPitch_),
+        std::cos(cameraYaw_) * horizontalLookScale,
+    };
+    // The initial pitch keeps the platform and cube in frame; T/G adjust it afterwards.
+    const math::Vector3 target = topDownView_
+        ? cameraPosition_ + math::Vector3{0.0f, -1.0f, 0.0f}
+        : cameraPosition_ + lookDirection;
+    // A downward-facing camera needs a horizontal up vector. Deriving it from yaw keeps Q/E rotating the view.
+    const bool useYawBasedUp = topDownView_ || std::abs(lookDirection.y) > 0.99f;
+    const math::Vector3 yawBasedUp{-std::cos(cameraYaw_), 0.0f, std::sin(cameraYaw_)};
+    const math::Vector3 up = useYawBasedUp ? yawBasedUp : math::Vector3{0.0f, 1.0f, 0.0f};
     const auto viewProjection = math::Matrix4::Multiply(
         math::Matrix4::LookAt(cameraPosition_, target, up),
         math::Matrix4::Perspective(fieldOfView_, static_cast<float>(width_) / height_, 0.1f, 100.0f));
@@ -302,6 +434,29 @@ void Renderer::Render() {
 
     ThrowIfFailed(commandAllocator_->Reset());
     ThrowIfFailed(commandList_->Reset(commandAllocator_.Get(), pipelineState_.Get()));
+
+    // First render the scene from the fixed sun position into a high-resolution depth map.
+    const D3D12_VIEWPORT shadowViewport{0.0f, 0.0f, static_cast<float>(kShadowMapSize), static_cast<float>(kShadowMapSize), 0.0f, 1.0f};
+    const D3D12_RECT shadowScissor{0, 0, static_cast<LONG>(kShadowMapSize), static_cast<LONG>(kShadowMapSize)};
+    const auto shadowDsv = shadowDsvHeap_->GetCPUDescriptorHandleForHeapStart();
+    commandList_->OMSetRenderTargets(0, nullptr, FALSE, &shadowDsv);
+    commandList_->ClearDepthStencilView(shadowDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    commandList_->RSSetViewports(1, &shadowViewport);
+    commandList_->RSSetScissorRects(1, &shadowScissor);
+    commandList_->SetPipelineState(shadowPipelineState_.Get());
+    commandList_->SetGraphicsRootSignature(rootSignature_.Get());
+    commandList_->SetGraphicsRootConstantBufferView(0, constantBuffer_->GetGPUVirtualAddress());
+    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
+    commandList_->DrawInstanced(vertexCount_, 1, 0, 0);
+
+    D3D12_RESOURCE_BARRIER shadowBarrier{};
+    shadowBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    shadowBarrier.Transition.pResource = shadowMap_.Get();
+    shadowBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    shadowBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    shadowBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    commandList_->ResourceBarrier(1, &shadowBarrier);
 
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -327,10 +482,17 @@ void Renderer::Render() {
 
     commandList_->SetPipelineState(pipelineState_.Get());
     commandList_->SetGraphicsRootSignature(rootSignature_.Get());
+    ID3D12DescriptorHeap* descriptorHeaps[]{shaderResourceHeap_.Get()};
+    commandList_->SetDescriptorHeaps(1, descriptorHeaps);
     commandList_->SetGraphicsRootConstantBufferView(0, constantBuffer_->GetGPUVirtualAddress());
+    commandList_->SetGraphicsRootDescriptorTable(1, shaderResourceHeap_->GetGPUDescriptorHandleForHeapStart());
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
-    commandList_->DrawInstanced(kCubeVertexCount, 1, 0, 0);
+    commandList_->DrawInstanced(vertexCount_, 1, 0, 0);
+
+    shadowBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    shadowBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    commandList_->ResourceBarrier(1, &shadowBarrier);
 
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
