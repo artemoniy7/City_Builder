@@ -437,29 +437,58 @@ WorldGenerationData GenerateWorld() {
         return scoreA > scoreB;
     });
 
+    // Cache whether a D8 cell eventually drains into the sea. The previous
+    // implementation traced every candidate independently, so thousands of
+    // candidates could repeatedly walk the same long downstream paths.
+    // Here each cell's drainage result is resolved at most once.
+    std::vector<unsigned char> reachesSeaState(cellCount, 0);
+    std::vector<int> drainagePath;
+    drainagePath.reserve(cellCount / 4);
+
+    const auto drainsToSea = [&](int start) {
+        drainagePath.clear();
+        int probe = start;
+
+        while (probe >= 0 && reachesSeaState[probe] == 0) {
+            const int px = probe % size;
+            const int pz = probe / size;
+            if (SeaMask(worldX(px), worldZ(pz)) > kSeaWaterThreshold) {
+                reachesSeaState[probe] = 3;
+                break;
+            }
+
+            reachesSeaState[probe] = 1;
+            drainagePath.push_back(probe);
+
+            const int next = flow[probe];
+            if (next < 0 || next == probe) {
+                reachesSeaState[probe] = 2;
+                break;
+            }
+            probe = next;
+        }
+
+        const bool reachesSea =
+            probe >= 0 && reachesSeaState[probe] == 3;
+        const unsigned char resolvedState = reachesSea ? 3 : 2;
+        for (auto it = drainagePath.rbegin(); it != drainagePath.rend(); ++it) {
+            if (reachesSeaState[*it] == 1)
+                reachesSeaState[*it] = resolvedState;
+        }
+        return reachesSea;
+    };
+
     std::vector<int> sources;
     for (const int source : candidates) {
         const int sx = source % size;
         const int sz = source / size;
         const float x = worldX(sx);
         const float z = worldZ(sz);
-        if (raw[source] < 150.0f || SeaMask(x, z) > 0.05f || accumulation[source] < 12) continue;
+        if (raw[source] < 150.0f || SeaMask(x, z) > 0.05f || accumulation[source] < 12)
+            continue;
 
-        // Only accept headwaters whose actual D8 route reaches the generated sea.
-        int probe = source;
-        bool reachesSea = false;
-        for (int step = 0; step < cellCount; ++step) {
-            const int px = probe % size;
-            const int pz = probe / size;
-            if (SeaMask(worldX(px), worldZ(pz)) > kSeaWaterThreshold) {
-                reachesSea = true;
-                break;
-            }
-            const int next = flow[probe];
-            if (next < 0 || next == probe) break;
-            probe = next;
-        }
-        if (!reachesSea) continue;
+        if (!drainsToSea(source))
+            continue;
 
         bool separated = true;
         for (const int selected : sources) {
