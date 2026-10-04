@@ -692,7 +692,8 @@ float DistanceToRiverCurve(
         const float distance = DistanceToSegment2D(x, z, a, b, segmentT);
         if (distance < bestDistance) {
             bestDistance = distance;
-            pathT = t0 + (t1 - t0) * segmentT;
+            pathT = (static_cast<float>(sample) + segmentT) /
+                static_cast<float>(kRiverCurveSamples);
         }
     }
     return bestDistance;
