@@ -110,43 +110,217 @@ float SeaMask(float x, float z) {
     return 1.0f - SmoothStep(0.82f, 1.02f, ellipseDistance - coastlineWarp);
 }
 
+float SegmentDistance(float x, float z, float ax, float az, float bx, float bz) {
+    const float dx = bx - ax;
+    const float dz = bz - az;
+    const float lengthSquared = dx * dx + dz * dz;
+    if (lengthSquared <= 0.0001f) {
+        const float px = x - ax;
+        const float pz = z - az;
+        return std::sqrt(px * px + pz * pz);
+    }
+
+    const float t = std::clamp(
+        ((x - ax) * dx + (z - az) * dz) / lengthSquared,
+        0.0f,
+        1.0f);
+    const float px = ax + dx * t;
+    const float pz = az + dz * t;
+    const float ex = x - px;
+    const float ez = z - pz;
+    return std::sqrt(ex * ex + ez * ez);
+}
+
+float TerraceCurve(float value, float softness) {
+    const float lower = std::floor(value);
+    const float local = value - lower;
+    const float rounded = SmoothStep(0.0f, 1.0f, local);
+    return lower + local * (1.0f - softness) + rounded * softness;
+}
+
 float BaseTerrainHeight(float x, float z, std::uint64_t seed) {
-    const float warpX = 850.0f * FbmNoise(x * 0.00010f + 7.0f, z * 0.00010f - 13.0f, seed + 11);
-    const float warpZ = 850.0f * FbmNoise(x * 0.00010f - 17.0f, z * 0.00010f + 5.0f, seed + 29);
+    // The terrain is deliberately built from several geographic scales:
+    // continental shape -> regional relief -> mountain belts -> valleys ->
+    // small detail. This produces fewer "noise blobs" and much broader,
+    // city-building-friendly landforms.
+    const float warpX =
+        1100.0f * FbmNoise(
+            x * 0.000065f + 3.0f,
+            z * 0.000065f - 9.0f,
+            seed + 11);
+    const float warpZ =
+        1100.0f * FbmNoise(
+            x * 0.000065f - 15.0f,
+            z * 0.000065f + 7.0f,
+            seed + 29);
+
     const float wx = x + warpX;
     const float wz = z + warpZ;
 
-    const float broad = FbmNoise(wx * 0.000075f, wz * 0.000075f, seed);
-    const float hills = FbmNoise(wx * 0.00023f + 31.0f, wz * 0.00023f - 19.0f, seed + 101);
-    const float detail = FbmNoise(wx * 0.00070f - 47.0f, wz * 0.00070f + 23.0f, seed + 211);
+    // Continentalness is intentionally very low frequency. It creates large
+    // coherent land regions instead of changing the terrain character every
+    // few hundred metres.
+    const float continentalNoise = FbmNoise(
+        wx * 0.000045f,
+        wz * 0.000045f,
+        seed + 71);
+    const float continentalness = SmoothStep(
+        -0.50f, 0.45f, continentalNoise);
 
-    float height = 28.0f + broad * 105.0f + hills * 52.0f + detail * 10.0f;
+    const float regional = FbmNoise(
+        wx * 0.000115f + 17.0f,
+        wz * 0.000115f - 23.0f,
+        seed + 101);
+    const float regionalRelief = FbmNoise(
+        wx * 0.00019f - 31.0f,
+        wz * 0.00019f + 13.0f,
+        seed + 151);
 
-    // A compact mountain province: a few ridged peaks instead of a wall of mountains.
-    const float mountainCenterX = 4300.0f + 1100.0f * FbmNoise(0.13f, 0.27f, seed + 301);
-    const float mountainCenterZ = 500.0f + 1500.0f * FbmNoise(0.41f, 0.19f, seed + 307);
-    const float dx = (wx - mountainCenterX) / 4300.0f;
-    const float dz = (wz - mountainCenterZ) / 5600.0f;
-    const float mountainMask = std::exp(-(dx * dx + dz * dz) * 1.7f);
-    const float ridges = RidgedNoise(wx * 0.00038f + 13.0f, wz * 0.00038f - 7.0f, seed + 401);
-    height += mountainMask * (250.0f + 520.0f * ridges);
+    // Broad rolling country. Most of the map lives here; mountains are a
+    // minority of the total land area.
+    float height =
+        -4.0f +
+        continentalness * 82.0f +
+        regional * 42.0f +
+        regionalRelief * 24.0f;
 
-    // A gentle continental gradient biases the drainage toward the sea corner.
-    height += (x - z) * 0.0016f;
+    // Gentle lowland basins. They make wide, buildable areas and give the
+    // hydrology enough large valleys to work with.
+    const float basinNoise = FbmNoise(
+        wx * 0.000075f + 41.0f,
+        wz * 0.000075f - 37.0f,
+        seed + 181);
+    const float basin = SmoothStep(-0.25f, 0.60f, basinNoise);
+    height -= (1.0f - basin) * 18.0f * continentalness;
 
+    // A broad, curved mountain belt. Instead of a single circular mountain
+    // blob, several overlapping ridge spines create a realistic chain with
+    // passes and valleys between them.
+    const float beltCenter =
+        SegmentDistance(
+            wx, wz,
+            1800.0f, -7600.0f,
+            4300.0f, -1500.0f);
+
+    const float beltCenter2 =
+        SegmentDistance(
+            wx, wz,
+            4300.0f, -1500.0f,
+            6500.0f, 5200.0f);
+
+    const float beltCenter3 =
+        SegmentDistance(
+            wx, wz,
+            6500.0f, 5200.0f,
+            9200.0f, 9300.0f);
+
+    const float beltDistance =
+        std::min({beltCenter, beltCenter2, beltCenter3});
+
+    const float beltMask =
+        1.0f - SmoothStep(1800.0f, 5200.0f, beltDistance);
+
+    const float ridgeNoise = RidgedNoise(
+        wx * 0.00024f + 19.0f,
+        wz * 0.00024f - 11.0f,
+        seed + 301);
+
+    const float ridgeFine = RidgedNoise(
+        wx * 0.00058f - 7.0f,
+        wz * 0.00058f + 29.0f,
+        seed + 331);
+
+    // Cross-ridge variation creates passes: the mountain belt is not a solid
+    // wall and does not turn the entire region into mountains.
+    const float crossRidge = 0.5f +
+        0.5f * FbmNoise(
+            wx * 0.00013f + 53.0f,
+            wz * 0.00013f - 47.0f,
+            seed + 361);
+
+    const float mountainStrength =
+        beltMask *
+        (0.34f + 0.66f * ridgeNoise) *
+        (0.72f + 0.28f * crossRidge);
+
+    height += mountainStrength *
+        (250.0f + 470.0f * ridgeNoise + 90.0f * ridgeFine);
+
+    // A smaller secondary upland region adds geographic variety without
+    // creating another mountain wall.
+    const float uplandX = 9800.0f;
+    const float uplandZ = -2200.0f;
+    const float uplandDistance = std::sqrt(
+        std::pow((wx - uplandX) / 4200.0f, 2.0f) +
+        std::pow((wz - uplandZ) / 3300.0f, 2.0f));
+    const float uplandMask =
+        1.0f - SmoothStep(0.35f, 1.0f, uplandDistance);
+    height += uplandMask *
+        (45.0f + 115.0f * FbmNoise(
+            wx * 0.00018f,
+            wz * 0.00018f,
+            seed + 411));
+
+    // Valley carving: ridged noise is used as a cheap erosion proxy. Where
+    // terrain is already elevated, broad noise valleys preferentially cut
+    // downward, giving mountain slopes recognizable drainage corridors.
+    const float valleyField = std::abs(FbmNoise(
+        wx * 0.000095f + 71.0f,
+        wz * 0.000095f - 67.0f,
+        seed + 451));
+    const float valleyStrength =
+        beltMask * (1.0f - SmoothStep(0.10f, 0.42f, valleyField));
+    height -= valleyStrength * std::max(height - 35.0f, 0.0f) * 0.16f;
+
+    // Erosion-like slope shaping. It compresses extreme noise peaks and
+    // preserves broad shoulders/foothills, which reads much more naturally
+    // than simply adding another high-frequency octave.
+    const float shoulderNoise = FbmNoise(
+        wx * 0.00033f + 83.0f,
+        wz * 0.00033f + 17.0f,
+        seed + 491);
+    const float shoulder = SmoothStep(0.15f, 0.75f, shoulderNoise);
+    height += shoulder * std::max(height - 80.0f, 0.0f) * 0.035f;
+    height -= (1.0f - shoulder) * std::max(height - 140.0f, 0.0f) * 0.045f;
+
+    // Very small surface detail. It is deliberately weak so distant terrain
+    // stays coherent and the generator does not look like raw noise.
+    const float detail = FbmNoise(
+        wx * 0.00082f - 47.0f,
+        wz * 0.00082f + 23.0f,
+        seed + 211);
+    const float detailMask = SmoothStep(0.05f, 0.75f, continentalness);
+    height += detail * 7.0f * detailMask;
+
+    // Keep a gentle continental slope toward the sea corner. The gradient is
+    // subtle; the actual drainage is still determined by the DEM/D8 pass.
+    height += (x - z) * 0.00105f;
+
+    // Coast: transition into a broad continental shelf instead of dropping
+    // directly from land to the final seabed.
     const float sea = SeaMask(x, z);
     const float shelf = SmoothStep(0.05f, 0.75f, sea);
-    const float seabed = -55.0f + 14.0f * FbmNoise(x * 0.00020f, z * 0.00020f, seed + 501);
-    height = height * (1.0f - shelf) + seabed * shelf;
+    const float seabedNoise = FbmNoise(
+        x * 0.00016f,
+        z * 0.00016f,
+        seed + 501);
+    const float seabed =
+        -55.0f + seabedNoise * 11.0f;
+    const float shelfDepth =
+        8.0f + 32.0f * SmoothStep(0.40f, 1.0f, sea);
+    const float shelfFloor =
+        kSeaLevel - shelfDepth;
 
-    // Keep the visible sea over a genuinely submerged basin. The water surface
-    // is intentionally separated from the terrain so the shoreline cannot
-    // shimmer from nearly coplanar depth values.
-    const float submerged = SmoothStep(0.55f, 0.78f, sea);
-    const float seaDepth = 8.0f + 32.0f * SmoothStep(0.55f, 1.0f, sea);
-    const float guaranteedSeabed = kSeaLevel - seaDepth;
-    const float submergedFloor = guaranteedSeabed + 4.0f;
-    height = std::min(height, height * (1.0f - submerged) + submergedFloor * submerged);
+    // First form a shallow shelf, then deepen its interior. This prevents the
+    // coastline from looking like an artificial cliff or bathtub.
+    height = height * (1.0f - shelf) +
+        (height * 0.35f + seabed * 0.65f) * shelf;
+
+    const float submerged = SmoothStep(0.55f, 0.82f, sea);
+    height = std::min(
+        height,
+        height * (1.0f - submerged) + shelfFloor * submerged);
+
     return height;
 }
 
