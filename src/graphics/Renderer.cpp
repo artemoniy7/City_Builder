@@ -1040,7 +1040,7 @@ void Renderer::CreateAssets() {
     for (const auto& river : GetWorldGeneration().rivers) {
         if (river.pathCount < 2) continue;
 
-        std::vector<UINT> grid(
+        std::vector<Vertex> riverGrid(
             static_cast<size_t>(riverSurfaceSamples + 1) *
             static_cast<size_t>(riverWidthSamples + 1));
 
@@ -1074,23 +1074,29 @@ void Renderer::CreateAssets() {
                 const size_t gridIndex =
                     static_cast<size_t>(i) * static_cast<size_t>(riverWidthSamples + 1) +
                     static_cast<size_t>(j);
-                grid[gridIndex] = static_cast<UINT>(waterVertices.size());
-                appendWaterVertex(x, waterLevel, z);
+                const float terrainHeight = TerrainHeight(x, z);
+                riverGrid[gridIndex] = {
+                    {x, waterLevel, z},
+                    {0.08f, 0.46f, 0.47f},
+                    {0.0f, 1.0f, 0.0f},
+                    std::max(waterLevel - terrainHeight, 0.05f)
+                };
             }
         }
 
         for (int i = 0; i < riverSurfaceSamples; ++i) {
             for (int j = 0; j < riverWidthSamples; ++j) {
-                const UINT a = grid[static_cast<size_t>(i) * (riverWidthSamples + 1) + j];
-                const UINT b = grid[static_cast<size_t>(i + 1) * (riverWidthSamples + 1) + j];
-                const UINT c = grid[static_cast<size_t>(i + 1) * (riverWidthSamples + 1) + j + 1];
-                const UINT d = grid[static_cast<size_t>(i) * (riverWidthSamples + 1) + j + 1];
-                // The water buffer is a non-indexed triangle list, so reuse the
-                // exact same four boundary positions for both triangles.
-                const Vertex va = waterVertices[a];
-                const Vertex vb = waterVertices[b];
-                const Vertex vc = waterVertices[c];
-                const Vertex vd = waterVertices[d];
+                const Vertex& a = riverGrid[
+                    static_cast<size_t>(i) * (riverWidthSamples + 1) + j];
+                const Vertex& b = riverGrid[
+                    static_cast<size_t>(i + 1) * (riverWidthSamples + 1) + j];
+                const Vertex& c = riverGrid[
+                    static_cast<size_t>(i + 1) * (riverWidthSamples + 1) + j + 1];
+                const Vertex& d = riverGrid[
+                    static_cast<size_t>(i) * (riverWidthSamples + 1) + j + 1];
+                // The water buffer is a non-indexed triangle list. Both
+                // triangles use the exact same grid coordinates, so adjacent
+                // quads cannot open a visible crack.
                 waterVertices.push_back(va);
                 waterVertices.push_back(vb);
                 waterVertices.push_back(vc);
