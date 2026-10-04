@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <numbers>
+#include <random>
 #include <stdexcept>
 #include <vector>
 
@@ -15,57 +16,219 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-float TerrainHeight(float x, float z) {
-    const float rollingHills = 7.0f * std::sin(x * 0.018f) * std::cos(z * 0.015f);
-    const float ridge = 18.0f * std::sin((x + z) * 0.008f) * std::sin((x - z) * 0.006f);
-    const float mountainDistance = (x - 210.0f) * (x - 210.0f) + (z - 170.0f) * (z - 170.0f);
-    const float mountainBase = std::exp(-(210.0f * 210.0f + 170.0f * 170.0f) / 28000.0f);
-    const float mountain = 115.0f * (std::exp(-mountainDistance / 28000.0f) - mountainBase);
-    const float baseHeight = rollingHills + ridge + mountain;
+constexpr float kWorldSize = 30000.0f;
+constexpr float kWorldHalfSize = kWorldSize * 0.5f;
+constexpr float kSeaLevel = -20.0f;
+constexpr int kRiverSamples = 24;
 
-    // Carve a shallow, sandy river channel into the existing lowland.
-    // The water sits above the bed, while the raised outer banks keep the
-    // shoreline physically connected to the surrounding terrain.
-    const float riverCenterX = -60.0f + 6.0f * std::sin(z * 0.018f);
-    const float riverLateralDistance = std::abs(x - riverCenterX);
-    constexpr float riverBedHalfWidth = 10.0f;
-    constexpr float riverBankHalfWidth = 22.0f;
-    constexpr float riverOuterHalfWidth = 36.0f;
-    constexpr float riverBedHeight = -7.5f;
-    constexpr float riverBankHeight = -1.0f;
+struct RiverDefinition {
+    float startX{};
+    float startZ{};
+    float endX{};
+    float endZ{};
+    float lateralAmplitude{};
+    float phase{};
+    float sourceWidth{};
+    float mouthWidth{};
+    std::array<float, kRiverSamples> waterLevels{};
+};
 
-    if (riverLateralDistance < riverOuterHalfWidth && z > -230.0f && z < 70.0f) {
-        if (riverLateralDistance <= riverBedHalfWidth) {
-            return std::min(baseHeight, riverBedHeight);
+struct WorldGenerationData {
+    std::uint64_t seed{};
+    std::array<RiverDefinition, 3> rivers{};
+};
+
+float SmoothStep(float edge0, float edge1, float value) {
+    const float t = std::clamp((value - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+float SeededNoise(float x, float z, std::uint64_t seed) {
+    const float seedOffset = static_cast<float>((seed % 1000003ULL) * 0.00017);
+    const float value =
+        std::sin(x * 12.9898f + z * 78.233f + seedOffset) *
+        43758.5453f;
+    return 2.0f * (value - std::floor(value)) - 1.0f;
+}
+
+float BaseTerrainHeight(float x, float z, std::uint64_t seed) {
+    const float macro = SeededNoise(x * 0.00009f, z * 0.00009f, seed);
+    const float hills = SeededNoise(x * 0.00028f + 19.0f, z * 0.00028f - 7.0f, seed + 17);
+    const float detail = SeededNoise(x * 0.00085f - 31.0f, z * 0.00085f + 11.0f, seed + 71);
+
+    float height = 55.0f + macro * 120.0f + hills * 55.0f + detail * 12.0f;
+
+    const float mountainPhase =
+        static_cast<float>((seed >> 12) % 10000ULL) * 0.00015f;
+    const float mountainAxis =
+        x - (7200.0f + 1500.0f * std::sin(z * 0.00024f + mountainPhase));
+    const float mountainMask =
+        std::exp(-(mountainAxis * mountainAxis) / (2.0f * 2500.0f * 2500.0f));
+    const float mountainVariation =
+        0.55f + 0.45f * (SeededNoise(x * 0.00032f + 43.0f, z * 0.00032f - 23.0f, seed + 101) + 1.0f) * 0.5f;
+    height += mountainMask * (520.0f + 620.0f * mountainVariation);
+
+    const float peakX =
+        7600.0f + 1700.0f * std::sin(mountainPhase * 1.7f + 1.1f);
+    const float peakZ =
+        -2500.0f + 6500.0f * std::cos(mountainPhase * 1.3f);
+    const float peakDistance =
+        (x - peakX) * (x - peakX) + (z - peakZ) * (z - peakZ);
+    height += 430.0f * std::exp(-peakDistance / 8500000.0f);
+
+    // One broad sea in the north-west corner. The seabed is below the
+    // shoreline, so the water surface can sit naturally above it.
+    const float seaX = SmoothStep(-15000.0f, -8500.0f, -x);
+    const float seaZ = SmoothStep(8500.0f, 15000.0f, z);
+    const float seaMask = seaX * seaZ;
+    const float seabedNoise =
+        SeededNoise(x * 0.00022f + 71.0f, z * 0.00022f - 37.0f, seed + 191);
+    const float seabed = -75.0f + seabedNoise * 18.0f;
+
+    return height * (1.0f - seaMask) + seabed * seaMask;
+}
+
+float RiverCenterX(const RiverDefinition& river, float t) {
+    const float baseX =
+        river.startX + (river.endX - river.startX) * t;
+    const float bend =
+        std::sin(t * std::numbers::pi_v<float> * 2.0f + river.phase) *
+        river.lateralAmplitude * std::sin(std::numbers::pi_v<float> * t);
+    return baseX + bend;
+}
+
+float RiverWaterLevel(const RiverDefinition& river, float t) {
+    const float scaled = std::clamp(t, 0.0f, 1.0f) * (kRiverSamples - 1);
+    const int index = static_cast<int>(scaled);
+    const int next = std::min(index + 1, kRiverSamples - 1);
+    const float localT = scaled - static_cast<float>(index);
+    return river.waterLevels[index] * (1.0f - localT) +
+        river.waterLevels[next] * localT;
+}
+
+WorldGenerationData GenerateWorld() {
+    std::random_device randomDevice;
+    const std::uint64_t seed =
+        (static_cast<std::uint64_t>(randomDevice()) << 32) ^
+        static_cast<std::uint64_t>(randomDevice());
+
+    std::mt19937_64 random(seed);
+    WorldGenerationData world{};
+    world.seed = seed;
+
+    // Three watersheds drain from the eastern highlands toward the north-west sea.
+    for (int i = 0; i < static_cast<int>(world.rivers.size()); ++i) {
+        auto& river = world.rivers[i];
+        river.startX = 5200.0f + static_cast<float>(random() % 5000);
+        river.startZ = -8500.0f + static_cast<float>(i) * 7000.0f +
+            static_cast<float>(static_cast<int>(random() % 1800) - 900);
+        river.endX = -13200.0f + static_cast<float>(i) * 1500.0f;
+        river.endZ = 10800.0f + static_cast<float>(i) * 1300.0f +
+            static_cast<float>(static_cast<int>(random() % 700) - 350);
+        river.lateralAmplitude = 500.0f +
+            static_cast<float>(random() % 900);
+        river.phase =
+            static_cast<float>(random() % 6283) * 0.001f;
+        river.sourceWidth = 24.0f + static_cast<float>(random() % 18);
+        river.mouthWidth = 80.0f + static_cast<float>(random() % 90);
+
+        const float sourceHeight =
+            BaseTerrainHeight(river.startX, river.startZ, seed);
+        const float sourceWater =
+            std::max(kSeaLevel + 12.0f, sourceHeight - 14.0f);
+
+        for (int sample = 0; sample < kRiverSamples; ++sample) {
+            const float t =
+                static_cast<float>(sample) / (kRiverSamples - 1);
+            const float z =
+                river.startZ + (river.endZ - river.startZ) * t;
+            const float x = RiverCenterX(river, t);
+            const float desired =
+                sourceWater * (1.0f - t) + (kSeaLevel + 0.8f) * t;
+            const float localGround =
+                BaseTerrainHeight(x, z, seed);
+
+            river.waterLevels[sample] =
+                std::min(desired, localGround - 3.0f);
         }
 
-        if (riverLateralDistance <= riverBankHalfWidth) {
-            const float t = (riverLateralDistance - riverBedHalfWidth) /
-                (riverBankHalfWidth - riverBedHalfWidth);
-            const float smoothT = t * t * (3.0f - 2.0f * t);
-            return riverBedHeight + (riverBankHeight - riverBedHeight) * smoothT;
+        // Force a clean, descending connection into the sea.
+        river.waterLevels[kRiverSamples - 1] = kSeaLevel + 0.8f;
+        for (int sample = kRiverSamples - 2; sample >= 0; --sample) {
+            river.waterLevels[sample] = std::max(
+                river.waterLevels[sample],
+                river.waterLevels[sample + 1] + 1.0f);
         }
-
-        const float t = (riverLateralDistance - riverBankHalfWidth) /
-            (riverOuterHalfWidth - riverBankHalfWidth);
-        const float smoothT = t * t * (3.0f - 2.0f * t);
-        return riverBankHeight + (baseHeight - riverBankHeight) * smoothT;
     }
 
-    return baseHeight;
+    return world;
+}
+
+const WorldGenerationData& GetWorldGeneration() {
+    static const WorldGenerationData world = GenerateWorld();
+    return world;
+}
+
+float TerrainHeight(float x, float z) {
+    const auto& world = GetWorldGeneration();
+    const float baseHeight = BaseTerrainHeight(x, z, world.seed);
+    float height = baseHeight;
+
+    for (const auto& river : world.rivers) {
+        const float t =
+            (z - river.startZ) / (river.endZ - river.startZ);
+        if (t < 0.0f || t > 1.0f) continue;
+
+        const float centerX = RiverCenterX(river, t);
+        const float distance = std::abs(x - centerX);
+        const float width =
+            river.sourceWidth +
+            (river.mouthWidth - river.sourceWidth) * t;
+        const float outerWidth = width * 1.9f;
+
+        if (distance >= outerWidth) continue;
+
+        const float waterLevel = RiverWaterLevel(river, t);
+        const float depth = 9.0f + 8.0f * t;
+        const float riverBed = waterLevel - depth;
+
+        if (distance <= width) {
+            height = std::min(height, riverBed);
+        } else {
+            const float bankT =
+                (distance - width) / (outerWidth - width);
+            const float smoothBank =
+                bankT * bankT * (3.0f - 2.0f * bankT);
+            const float minimumBank =
+                waterLevel + 2.5f;
+            const float bankHeight =
+                std::max(baseHeight, minimumBank);
+            height = std::min(
+                height,
+                riverBed * (1.0f - smoothBank) +
+                    bankHeight * smoothBank);
+        }
+    }
+
+    return height;
 }
 
 city::math::Vector3 TerrainNormal(float x, float z) {
-    constexpr float sampleDistance = 2.0f;
-    const float dx = TerrainHeight(x + sampleDistance, z) - TerrainHeight(x - sampleDistance, z);
-    const float dz = TerrainHeight(x, z + sampleDistance) - TerrainHeight(x, z - sampleDistance);
-    return city::math::Normalize({-dx, sampleDistance * 2.0f, -dz});
+    constexpr float sampleDistance = 8.0f;
+    const float dx =
+        TerrainHeight(x + sampleDistance, z) -
+        TerrainHeight(x - sampleDistance, z);
+    const float dz =
+        TerrainHeight(x, z + sampleDistance) -
+        TerrainHeight(x, z - sampleDistance);
+    return city::math::Normalize({
+        -dx, sampleDistance * 2.0f, -dz
+    });
 }
 
 float TerrainNoise(float x, float z) {
-    // Deterministic value noise: stable between runs and cheap enough for terrain generation.
-    const float value = std::sin(x * 12.9898f + z * 78.233f) * 43758.5453f;
-    return 2.0f * (value - std::floor(value)) - 1.0f;
+    return SeededNoise(
+        x, z, GetWorldGeneration().seed);
 }
 
 city::math::Vector3 ResolveCameraTerrainCollision(const city::math::Vector3& target, const city::math::Vector3& desiredPosition) {
@@ -396,43 +559,45 @@ void Renderer::CreateAssets() {
         {{-1,0, 1},{0,1,1},{0,-1,0}}, {{ 1,0,-1},{0,1,1},{0,-1,0}}, {{ 1,0, 1},{0,1,1},{0,-1,0}},
     };
 
-    constexpr float terrainSize = 1000.0f;
+    constexpr float terrainSize = kWorldSize;
     const float cellSize = terrainSize / kTerrainResolution;
     const auto appendTerrainVertex = [&vertices](float x, float z) {
         const float height = TerrainHeight(x, z);
         const auto normal = TerrainNormal(x, z);
         const float slope = 1.0f - normal.y;
-        const float riverCenterX = -60.0f + 6.0f * std::sin(z * 0.018f);
-        const bool riverSandBank =
-            std::abs(x - riverCenterX) < 36.0f && z > -230.0f && z < 70.0f;
-        const std::array<float, 3> baseColor =
-            (height < -6.0f || riverSandBank) ? std::array<float, 3>{0.76f, 0.67f, 0.35f}
-            : (slope > 0.22f || height > 55.0f) ? std::array<float, 3>{0.42f, 0.43f, 0.40f}
-            : (slope > 0.10f) ? std::array<float, 3>{0.38f, 0.24f, 0.13f}
-            : std::array<float, 3>{0.20f, 0.55f, 0.22f};
 
-        // Add subtle, deterministic RGB variation so large terrain areas are not perfectly flat.
-        const float noise = TerrainNoise(x * 0.075f, z * 0.075f);
-        const float redNoise = TerrainNoise(x * 0.11f + 17.0f, z * 0.11f - 31.0f);
-        const float greenNoise = TerrainNoise(x * 0.11f - 43.0f, z * 0.11f + 7.0f);
-        const float blueNoise = TerrainNoise(x * 0.11f + 61.0f, z * 0.11f + 29.0f);
+        const std::array<float, 3> baseColor =
+            (height < kSeaLevel + 4.0f) ? std::array<float, 3>{0.68f, 0.59f, 0.35f}
+            : (height > 750.0f || slope > 0.30f) ? std::array<float, 3>{0.42f, 0.43f, 0.40f}
+            : (slope > 0.12f) ? std::array<float, 3>{0.38f, 0.29f, 0.18f}
+            : (height < 35.0f) ? std::array<float, 3>{0.22f, 0.52f, 0.24f}
+            : std::array<float, 3>{0.25f, 0.48f, 0.21f};
+
+        const float noise = TerrainNoise(x * 0.0011f, z * 0.0011f);
+        const float redNoise = TerrainNoise(x * 0.0024f + 17.0f, z * 0.0024f - 31.0f);
+        const float greenNoise = TerrainNoise(x * 0.0024f - 43.0f, z * 0.0024f + 7.0f);
+        const float blueNoise = TerrainNoise(x * 0.0024f + 61.0f, z * 0.0024f + 29.0f);
         std::array<float, 3> color{
-            baseColor[0] * (1.0f + noise * 0.08f) + redNoise * 0.025f,
-            baseColor[1] * (1.0f + noise * 0.08f) + greenNoise * 0.025f,
-            baseColor[2] * (1.0f + noise * 0.08f) + blueNoise * 0.025f
+            baseColor[0] * (1.0f + noise * 0.08f) + redNoise * 0.02f,
+            baseColor[1] * (1.0f + noise * 0.08f) + greenNoise * 0.02f,
+            baseColor[2] * (1.0f + noise * 0.08f) + blueNoise * 0.02f
         };
 
-        // Snow gradually appears on high, flatter mountain surfaces, with a little noise
-        // to keep the snow line irregular instead of producing a hard horizontal cutoff.
-        const float snowHeight = std::clamp((height - 58.0f) / 14.0f, 0.0f, 1.0f);
-        const float snowSlope = std::clamp(1.0f - std::max(slope - 0.12f, 0.0f) / 0.28f, 0.0f, 1.0f);
-        const float snowCoverage = snowHeight * snowSlope * (0.82f + 0.18f * (noise + 1.0f) * 0.5f);
+        const float snowHeight = std::clamp((height - 950.0f) / 420.0f, 0.0f, 1.0f);
+        const float snowSlope =
+            std::clamp(1.0f - std::max(slope - 0.10f, 0.0f) / 0.34f, 0.0f, 1.0f);
+        const float snowCoverage =
+            snowHeight * snowSlope * (0.82f + 0.18f * (noise + 1.0f) * 0.5f);
         color[0] = color[0] * (1.0f - snowCoverage) + snowCoverage;
         color[1] = color[1] * (1.0f - snowCoverage) + snowCoverage;
         color[2] = color[2] * (1.0f - snowCoverage) + snowCoverage;
 
         for (float& channel : color) channel = std::clamp(channel, 0.0f, 1.0f);
-        vertices.push_back({{x, height, z}, {color[0], color[1], color[2]}, {normal.x, normal.y, normal.z}});
+        vertices.push_back({
+            {x, height, z},
+            {color[0], color[1], color[2]},
+            {normal.x, normal.y, normal.z}
+        });
     };
     vertices.reserve(vertices.size() + kTerrainResolution * kTerrainResolution * 6);
     for (UINT z = 0; z < kTerrainResolution; ++z) {
@@ -472,113 +637,142 @@ void Renderer::CreateAssets() {
 
     vertexBufferView_ = {vertexBuffer_->GetGPUVirtualAddress(), bufferSize, sizeof(Vertex)};
 
-    // ---------- River geometry ----------
-    // Build the river as one continuous shared grid. Every row of vertices is
-    // calculated once and reused by both neighboring segments, so there can
-    // never be a geometric gap between adjacent water tiles.
+    // ---------- River and sea geometry ----------
+    // Rivers are generated from shared rows so neighboring water tiles use
+    // exactly the same boundary positions. Their water level descends toward
+    // the north-west sea and the terrain generator carves the corresponding beds.
     std::vector<Vertex> waterVertices;
-    constexpr int riverSegments = 56;
-    constexpr int riverWidthSegments = 10;
-    constexpr float riverStartZ = -230.0f;
-    constexpr float riverEndZ = 70.0f;
-    constexpr float riverWidth = 30.0f;
 
-    // Keep the surface above the raised sandy banks and below the wave crest range,
-    // so animated troughs never let the terrain break through the water.
-    constexpr float riverSurfaceHeight = 0.0f;
-
-    const auto riverCenter = [](float z) {
-        return -60.0f + 6.0f * std::sin(z * 0.018f);
-    };
-
-    const int rowWidth = riverWidthSegments + 1;
-    std::vector<math::Vector3> waterGrid(
-        static_cast<size_t>(riverSegments + 1) * rowWidth);
-
-    const auto gridIndex = [rowWidth](int segment, int widthSegment) {
-        return static_cast<size_t>(segment) * rowWidth + widthSegment;
-    };
-
-    for (int segment = 0; segment <= riverSegments; ++segment) {
-        const float t = static_cast<float>(segment) / riverSegments;
-        const float z = riverStartZ + (riverEndZ - riverStartZ) * t;
-        const float centerX = riverCenter(z);
-
-        float tangentX = 0.0f;
-        float tangentZ = 1.0f;
-        if (segment == 0) {
-            const float nextZ = riverStartZ + (riverEndZ - riverStartZ) / riverSegments;
-            tangentX = riverCenter(nextZ) - centerX;
-            tangentZ = nextZ - z;
-        } else if (segment == riverSegments) {
-            const float previousZ = riverStartZ +
-                (riverEndZ - riverStartZ) * static_cast<float>(segment - 1) / riverSegments;
-            tangentX = centerX - riverCenter(previousZ);
-            tangentZ = z - previousZ;
-        } else {
-            const float previousZ = riverStartZ +
-                (riverEndZ - riverStartZ) * static_cast<float>(segment - 1) / riverSegments;
-            const float nextZ = riverStartZ +
-                (riverEndZ - riverStartZ) * static_cast<float>(segment + 1) / riverSegments;
-            tangentX = riverCenter(nextZ) - riverCenter(previousZ);
-            tangentZ = nextZ - previousZ;
-        }
-
-        const math::Vector3 tangent = math::Normalize({tangentX, 0.0f, tangentZ});
-        const math::Vector3 side{-tangent.z, 0.0f, tangent.x};
-
-        for (int widthSegment = 0; widthSegment <= riverWidthSegments; ++widthSegment) {
-            const float widthT =
-                static_cast<float>(widthSegment) / riverWidthSegments - 0.5f;
-            waterGrid[gridIndex(segment, widthSegment)] = {
-                centerX + side.x * riverWidth * widthT,
-                riverSurfaceHeight,
-                z + side.z * riverWidth * widthT
-            };
-        }
-    }
-
-    waterVertices.reserve(
-        static_cast<size_t>(riverSegments) * riverWidthSegments * 6);
-
-    const auto appendWaterVertex = [&waterVertices](const math::Vector3& position) {
+    const auto appendWaterVertex = [&waterVertices](float x, float y, float z) {
         constexpr std::array<float, 3> waterColor{0.05f, 0.42f, 0.50f};
-        const auto normal = TerrainNormal(position.x, position.z);
         waterVertices.push_back({
-            {position.x, position.y, position.z},
+            {x, y, z},
             {waterColor[0], waterColor[1], waterColor[2]},
-            {normal.x, normal.y, normal.z}
+            {0.0f, 1.0f, 0.0f}
         });
     };
 
-    for (int segment = 0; segment < riverSegments; ++segment) {
-        for (int widthSegment = 0; widthSegment < riverWidthSegments; ++widthSegment) {
-            const math::Vector3& left0 = waterGrid[gridIndex(segment, widthSegment)];
-            const math::Vector3& right0 = waterGrid[gridIndex(segment, widthSegment + 1)];
-            const math::Vector3& left1 = waterGrid[gridIndex(segment + 1, widthSegment)];
-            const math::Vector3& right1 = waterGrid[gridIndex(segment + 1, widthSegment + 1)];
+    const auto appendRiver = [&waterVertices, &appendWaterVertex](const RiverDefinition& river) {
+        constexpr int widthSegments = 8;
+        const int rowWidth = widthSegments + 1;
+        std::vector<math::Vector3> positions(
+            static_cast<size_t>(kRiverSamples) * rowWidth);
 
-            // Adjacent tiles reuse the exact same grid positions. The two
-            // triangles here therefore meet edge-to-edge with no seam.
-            appendWaterVertex(left0);
-            appendWaterVertex(right0);
-            appendWaterVertex(right1);
-            appendWaterVertex(left0);
-            appendWaterVertex(right1);
-            appendWaterVertex(left1);
+        const auto index = [rowWidth](int row, int column) {
+            return static_cast<size_t>(row) * rowWidth + column;
+        };
+
+        for (int row = 0; row < kRiverSamples; ++row) {
+            const float t =
+                static_cast<float>(row) / (kRiverSamples - 1);
+            const float z =
+                river.startZ + (river.endZ - river.startZ) * t;
+            const float centerX = RiverCenterX(river, t);
+            const float nextT =
+                std::min(1.0f, t + 1.0f / (kRiverSamples - 1));
+            const float previousT =
+                std::max(0.0f, t - 1.0f / (kRiverSamples - 1));
+            const float tangentX =
+                RiverCenterX(river, nextT) -
+                RiverCenterX(river, previousT);
+            const float tangentZ =
+                (nextT - previousT) *
+                (river.endZ - river.startZ);
+            const math::Vector3 tangent =
+                math::Normalize({tangentX, 0.0f, tangentZ});
+            const math::Vector3 side{-tangent.z, 0.0f, tangent.x};
+            const float width =
+                river.sourceWidth +
+                (river.mouthWidth - river.sourceWidth) * t;
+            const float waterLevel =
+                RiverWaterLevel(river, t);
+
+            for (int column = 0; column <= widthSegments; ++column) {
+                const float widthT =
+                    static_cast<float>(column) / widthSegments - 0.5f;
+                positions[index(row, column)] = {
+                    centerX + side.x * width * widthT,
+                    waterLevel,
+                    z + side.z * width * widthT
+                };
+            }
+        }
+
+        for (int row = 0; row < kRiverSamples - 1; ++row) {
+            for (int column = 0; column < widthSegments; ++column) {
+                const auto& left0 = positions[index(row, column)];
+                const auto& right0 = positions[index(row, column + 1)];
+                const auto& left1 = positions[index(row + 1, column)];
+                const auto& right1 = positions[index(row + 1, column + 1)];
+
+                appendWaterVertex(left0.x, left0.y, left0.z);
+                appendWaterVertex(right0.x, right0.y, right0.z);
+                appendWaterVertex(right1.x, right1.y, right1.z);
+                appendWaterVertex(left0.x, left0.y, left0.z);
+                appendWaterVertex(right1.x, right1.y, right1.z);
+                appendWaterVertex(left1.x, left1.y, left1.z);
+            }
+        }
+    };
+
+    const auto& world = GetWorldGeneration();
+    for (const auto& river : world.rivers) {
+        appendRiver(river);
+    }
+
+    // A single coarse grid fills the north-west corner as the sea. Terrain below
+    // the sea level naturally hides the seabed while land above it forms the coast.
+    constexpr int seaSegments = 32;
+    constexpr float seaMinX = -15000.0f;
+    constexpr float seaMaxX = -6500.0f;
+    constexpr float seaMinZ = 6500.0f;
+    constexpr float seaMaxZ = 15000.0f;
+
+    for (int zIndex = 0; zIndex < seaSegments; ++zIndex) {
+        const float z0 = seaMinZ +
+            (seaMaxZ - seaMinZ) * static_cast<float>(zIndex) / seaSegments;
+        const float z1 = seaMinZ +
+            (seaMaxZ - seaMinZ) * static_cast<float>(zIndex + 1) / seaSegments;
+
+        for (int xIndex = 0; xIndex < seaSegments; ++xIndex) {
+            const float x0 = seaMinX +
+                (seaMaxX - seaMinX) * static_cast<float>(xIndex) / seaSegments;
+            const float x1 = seaMinX +
+                (seaMaxX - seaMinX) * static_cast<float>(xIndex + 1) / seaSegments;
+
+            const float centerX = (x0 + x1) * 0.5f;
+            const float centerZ = (z0 + z1) * 0.5f;
+            const float seaX = SmoothStep(-15000.0f, -8500.0f, -centerX);
+            const float seaZ = SmoothStep(8500.0f, 15000.0f, centerZ);
+            if (seaX * seaZ < 0.18f) continue;
+
+            const float seaY = kSeaLevel + 0.8f;
+            appendWaterVertex(x0, seaY, z0);
+            appendWaterVertex(x1, seaY, z0);
+            appendWaterVertex(x1, seaY, z1);
+            appendWaterVertex(x0, seaY, z0);
+            appendWaterVertex(x1, seaY, z1);
+            appendWaterVertex(x0, seaY, z1);
         }
     }
 
-    const UINT waterBufferSize = static_cast<UINT>(waterVertices.size() * sizeof(Vertex));
+    const UINT waterBufferSize =
+        static_cast<UINT>(waterVertices.size() * sizeof(Vertex));
     bufferDescription.Width = waterBufferSize;
-    ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&waterVertexBuffer_)));
+    ThrowIfFailed(device_->CreateCommittedResource(
+        &uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        IID_PPV_ARGS(&waterVertexBuffer_)));
 
     void* waterVertexData{};
     ThrowIfFailed(waterVertexBuffer_->Map(0, nullptr, &waterVertexData));
     std::memcpy(waterVertexData, waterVertices.data(), waterBufferSize);
     waterVertexBuffer_->Unmap(0, nullptr);
-    waterVertexBufferView_ = {waterVertexBuffer_->GetGPUVirtualAddress(), waterBufferSize, sizeof(Vertex)};
+    waterVertexBufferView_ = {
+        waterVertexBuffer_->GetGPUVirtualAddress(),
+        waterBufferSize,
+        sizeof(Vertex)
+    };
     waterVertexCount_ = static_cast<UINT>(waterVertices.size());
 
     // ---------- Constant buffer ----------
@@ -592,7 +786,7 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     // Pan speed grows with zoom distance, similar to city-builder camera controls:
     // a distant camera needs to cross much more world space per second.
     constexpr float baseMoveSpeed = 8.0f;
-    constexpr float referenceOrbitDistance = 18.0f;
+    constexpr float referenceOrbitDistance = 1200.0f;
     constexpr float maxMoveSpeedMultiplier = 12.0f;
     const float zoomSpeedMultiplier = std::clamp(
         cameraOrbitDistance_ / referenceOrbitDistance,
@@ -618,10 +812,10 @@ void Renderer::UpdateCamera(float deltaSeconds) {
 
     // T/G control zoom through the orbit radius.
     // Zooming moves the camera along its orbit and therefore naturally rises/falls with the current pitch.
-    constexpr float zoomKeySpeed = 24.0f;
+    constexpr float zoomKeySpeed = 600.0f;
     if (GetAsyncKeyState('T') & 0x8000) cameraOrbitDistance_ -= zoomKeySpeed * deltaSeconds;
     if (GetAsyncKeyState('G') & 0x8000) cameraOrbitDistance_ += zoomKeySpeed * deltaSeconds;
-    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 240.0f);
+    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 15000.0f);
 
     // Keep the view between horizontal and straight down; the camera cannot look above the horizon.
     cameraPitch_ = std::clamp(cameraPitch_, -std::numbers::pi_v<float> * 0.5f, 0.0f);
@@ -651,7 +845,7 @@ void Renderer::OnMouseWheel(short delta) {
     constexpr float zoomStep = 1.15f;
     if (delta > 0) cameraOrbitDistance_ /= zoomStep;
     else if (delta < 0) cameraOrbitDistance_ *= zoomStep;
-    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 240.0f);
+    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 15000.0f);
 
     const float horizontalScale = std::cos(cameraPitch_);
     const math::Vector3 offset{
