@@ -168,7 +168,10 @@ float4 PSWater(PixelInput input) : SV_TARGET
 
     // TerrainHeight is baked into the water mesh as waterDepth. This avoids a
     // second terrain texture while still giving every water pixel a local depth.
-    const float depthFactor = smoothstep(0.5f, 18.0f, input.waterDepth);
+    // Normalize the terrain-derived depth so the material has a predictable
+    // shallow-to-deep transition across both rivers and the sea.
+    const float maxDepth = 20.0f;
+    const float depthFactor = saturate(input.waterDepth / maxDepth);
     const float3 waterColor = lerp(shallowColor, deepColor, depthFactor);
 
     const float3 baseNormal = normalize(input.normal);
@@ -178,11 +181,17 @@ float4 PSWater(PixelInput input) : SV_TARGET
     {
         // Two small, independent normal ripples keep the surface alive even
         // when the geometric Gerstner displacement is subtle.
+        // Long, smooth travelling ripples. The low frequencies and slow
+        // phase speeds avoid a painted/noisy look while keeping the normal
+        // continuously moving.
         const float rippleA =
-            sin(dot(input.worldPosition.xz, float2(0.62f, 0.31f)) + timeSeconds * 1.85f);
+            sin(dot(input.worldPosition.xz, normalize(float2(1.0f, 0.35f))) * 0.05f
+                + timeSeconds * 0.02f);
         const float rippleB =
-            sin(dot(input.worldPosition.xz, float2(-0.27f, 0.71f)) - timeSeconds * 1.25f);
-        const float waveNormalStrength = 0.075f * smoothstep(0.15f, 2.5f, input.waterDepth);
+            sin(dot(input.worldPosition.xz, normalize(float2(-0.60f, 1.0f))) * 0.08f
+                - timeSeconds * 0.01f);
+        const float waveNormalStrength =
+            0.12f * smoothstep(0.15f, 2.5f, input.waterDepth);
         normal.x += rippleA * waveNormalStrength;
         normal.z += rippleB * waveNormalStrength;
         normal = normalize(normal);
@@ -194,7 +203,7 @@ float4 PSWater(PixelInput input) : SV_TARGET
     const float3 halfVector = normalize(sunDirection + viewDirection);
 
     // Fresnel makes the surface reflect more sky at grazing viewing angles.
-    const float fresnel = pow(1.0f - saturate(dot(normal, viewDirection)), 5.0f);
+    const float fresnel = pow(1.0f - saturate(dot(normal, viewDirection)), 3.0f);
     const float3 reflectedColor = lerp(waterColor, skyColor, 0.10f + fresnel * 0.72f);
 
     const float shadow = CalculateShadow(input.shadowPosition);
@@ -210,14 +219,19 @@ float4 PSWater(PixelInput input) : SV_TARGET
 
     float3 finalColor = reflectedColor * diffuse + sunReflection;
 
-    // Shallow water receives a soft foam tint where the submerged terrain is
-    // close to the surface. It fades away naturally with depth.
-    const float foam = 1.0f - smoothstep(0.25f, 1.5f, input.waterDepth);
+    // Foam is confined to the shallowest submerged terrain. The river beds
+    // are intentionally much deeper toward their centers, so the foam stays
+    // on the shoreline rather than filling the middle of the channel.
+    const float foam = 1.0f - smoothstep(0.0f, 1.5f, input.waterDepth);
     finalColor = lerp(finalColor, float3(0.88f, 0.95f, 0.92f), foam * 0.60f);
+
+    // Keep the material physically restrained: the water may reflect the
+    // sky, but it should not become brighter than the sky itself.
+    finalColor = min(finalColor, skyColor);
 
     // At strategic-map distance, remove the expensive animated terms while
     // keeping the same depth-aware water material.
-    const float alpha = smoothstep(0.05f, 2.0f, input.waterDepth);
+    const float alpha = smoothstep(0.0f, 2.0f, input.waterDepth);
     const float distantAlpha = cameraOrbitDistance >= 5500.0f ? 1.0f : alpha;
     return float4(finalColor, distantAlpha);
 }
