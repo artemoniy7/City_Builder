@@ -1198,11 +1198,12 @@ void Renderer::Render() {
     commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
     commandList_->DrawInstanced(vertexCount_, 1, 0, 0);
 
-    // Water is rendered after terrain as an opaque surface. The terrain has
-    // already been carved below the water level, so the channel stays clean.
+    // Draw the exact same terrain mesh a second time as the water state.
+    // The water shader clips dry vertices and lifts submerged vertices to their
+    // local water level, so there is no independent river/sea geometry to tear.
     commandList_->SetPipelineState(waterPipelineState_.Get());
-    commandList_->IASetVertexBuffers(0, 1, &waterVertexBufferView_);
-    commandList_->DrawInstanced(waterVertexCount_, 1, 0, 0);
+    commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
+    commandList_->DrawInstanced(vertexCount_, 1, 0, 0);
 
     shadowBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     shadowBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
