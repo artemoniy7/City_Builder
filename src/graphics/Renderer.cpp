@@ -1104,11 +1104,9 @@ void Renderer::CreateAssets() {
     // The sea is a single quarter-ellipse fan attached to the world corner,
     // rather than a rectangular grid. A low-frequency radial warp makes the
     // coastline organic while keeping the surface topologically continuous.
-    constexpr int seaArcSamples = 96;
+    constexpr int seaArcSamples = 128;
     constexpr float seaCenterX = -15000.0f;
     constexpr float seaCenterZ = 15000.0f;
-    constexpr float seaRadiusX = 9600.0f;
-    constexpr float seaRadiusZ = 9600.0f;
     const float seaLevel = kSeaLevel + 0.8f + 0.04f;
     const size_t seaCenterIndex = waterVertices.size();
     appendWaterVertex(seaCenterX, seaLevel, seaCenterZ);
@@ -1116,12 +1114,27 @@ void Renderer::CreateAssets() {
     for (int i = 0; i <= seaArcSamples; ++i) {
         const float angle = (std::numbers::pi_v<float> * 0.5f) *
             static_cast<float>(i) / static_cast<float>(seaArcSamples);
-        const float warp = 1.0f + 0.035f * FbmNoise(
-            std::cos(angle) * 1.7f,
-            std::sin(angle) * 1.7f,
-            GetWorldGeneration().seed + 777);
-        const float x = seaCenterX + seaRadiusX * warp * std::cos(angle);
-        const float z = seaCenterZ - seaRadiusZ * warp * std::sin(angle);
+        const float dirX = std::cos(angle);
+        const float dirZ = -std::sin(angle);
+
+        // Find the exact shoreline used by the terrain's SeaMask instead of
+        // approximating it with a second, slightly different ellipse. A few
+        // cheap bisection steps give us a smooth continuous coast that matches
+        // the generated seabed all the way around the mouth region.
+        float lowRadius = 0.0f;
+        float highRadius = 14000.0f;
+        for (int iteration = 0; iteration < 14; ++iteration) {
+            const float radius = (lowRadius + highRadius) * 0.5f;
+            const float x = seaCenterX + dirX * radius;
+            const float z = seaCenterZ + dirZ * radius;
+            if (SeaMask(x, z) >= kSeaWaterThreshold)
+                lowRadius = radius;
+            else
+                highRadius = radius;
+        }
+        const float radius = (lowRadius + highRadius) * 0.5f;
+        const float x = seaCenterX + dirX * radius;
+        const float z = seaCenterZ + dirZ * radius;
         seaArc[i] = static_cast<UINT>(waterVertices.size());
         appendWaterVertex(x, seaLevel, z);
     }
