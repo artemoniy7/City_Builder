@@ -90,13 +90,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> waterPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> shadowPipelineState_;
     Microsoft::WRL::ComPtr<ID3D12Resource> vertexBuffer_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> waterVertexBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> constantBuffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> shadowMap_;
     D3D12_VERTEX_BUFFER_VIEW vertexBufferView_{};
-    D3D12_VERTEX_BUFFER_VIEW waterVertexBufferView_{};
     UINT vertexCount_{};
-    UINT waterVertexCount_{};
     SceneConstants* mappedConstants_{};
     Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
     HANDLE fenceEvent_{};
