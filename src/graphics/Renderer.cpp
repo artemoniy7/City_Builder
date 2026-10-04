@@ -938,7 +938,9 @@ void Renderer::CreateAssets() {
     const float cellSize = terrainSize / kTerrainResolution;
     const auto appendTerrainVertex = [&vertices](float x, float z) {
         const float height = TerrainHeight(x, z);
-        const float waterDepth = WaterLevelAt(x, z) - height;
+        // Water is rendered by continuous spline/shore meshes now. Keep the
+        // terrain pass purely land so the water cannot inherit terrain-grid seams.
+        constexpr float waterDepth = -1.0f;
         const auto normal = TerrainNormal(x, z);
         const float slope = 1.0f - normal.y;
         const bool riverSandBank = height < 4.0f && height > -18.0f;
@@ -1014,9 +1016,139 @@ void Renderer::CreateAssets() {
 
     vertexBufferView_ = {vertexBuffer_->GetGPUVirtualAddress(), bufferSize, sizeof(Vertex)};
 
-    // Water is not a second geometry anymore. The terrain vertex buffer
-    // carries signed waterDepth for the water material pass.
-    
+    // ---------- Continuous water bodies ----------
+    // Rivers are swept as one shared ribbon per river. There are no terrain
+    // tiles involved in the shoreline itself: every bend is sampled from the
+    // same Catmull-Rom curve and neighboring stations reuse the same boundary
+    // vertices, so the bank stays continuous through sharp turns.
+    std::vector<Vertex> waterVertices;
+    waterVertices.reserve(4 * 129 * 9 + 100);
+
+    const auto appendWaterVertex = [&waterVertices](float x, float y, float z) {
+        const float terrainHeight = TerrainHeight(x, z);
+        const float waterDepth = std::max(y - terrainHeight, 0.05f);
+        waterVertices.push_back({
+            {x, y, z},
+            {0.08f, 0.46f, 0.47f},
+            {0.0f, 1.0f, 0.0f},
+            waterDepth
+        });
+    };
+
+    constexpr int riverSurfaceSamples = 128;
+    constexpr int riverWidthSamples = 8;
+    for (const auto& river : GetWorldGeneration().rivers) {
+        if (river.pathCount < 2) continue;
+
+        std::vector<UINT> grid(
+            static_cast<size_t>(riverSurfaceSamples + 1) *
+            static_cast<size_t>(riverWidthSamples + 1));
+
+        for (int i = 0; i <= riverSurfaceSamples; ++i) {
+            const float pathT = static_cast<float>(i) /
+                static_cast<float>(riverSurfaceSamples);
+            const auto center = RiverCurvePoint(river, pathT);
+
+            const float tangentStep = 1.0f / static_cast<float>(riverSurfaceSamples);
+            const auto before = RiverCurvePoint(
+                river, std::max(0.0f, pathT - tangentStep));
+            const auto after = RiverCurvePoint(
+                river, std::min(1.0f, pathT + tangentStep));
+            const float tangentX = after.x - before.x;
+            const float tangentZ = after.z - before.z;
+            const float tangentLength = std::max(
+                std::sqrt(tangentX * tangentX + tangentZ * tangentZ), 0.001f);
+            const float sideX = tangentZ / tangentLength;
+            const float sideZ = -tangentX / tangentLength;
+
+            const float riverWidth = RiverSampleValue(
+                river, pathT, river.widths);
+            const float waterLevel = RiverSampleValue(
+                river, pathT, river.waterLevels) + 0.04f;
+
+            for (int j = 0; j <= riverWidthSamples; ++j) {
+                const float across = static_cast<float>(j) /
+                    static_cast<float>(riverWidthSamples) * 2.0f - 1.0f;
+                const float x = center.x + sideX * riverWidth * across;
+                const float z = center.z + sideZ * riverWidth * across;
+                const size_t gridIndex =
+                    static_cast<size_t>(i) * static_cast<size_t>(riverWidthSamples + 1) +
+                    static_cast<size_t>(j);
+                grid[gridIndex] = static_cast<UINT>(waterVertices.size());
+                appendWaterVertex(x, waterLevel, z);
+            }
+        }
+
+        for (int i = 0; i < riverSurfaceSamples; ++i) {
+            for (int j = 0; j < riverWidthSamples; ++j) {
+                const UINT a = grid[static_cast<size_t>(i) * (riverWidthSamples + 1) + j];
+                const UINT b = grid[static_cast<size_t>(i + 1) * (riverWidthSamples + 1) + j];
+                const UINT c = grid[static_cast<size_t>(i + 1) * (riverWidthSamples + 1) + j + 1];
+                const UINT d = grid[static_cast<size_t>(i) * (riverWidthSamples + 1) + j + 1];
+                // The water buffer is a non-indexed triangle list, so reuse the
+                // exact same four boundary positions for both triangles.
+                const Vertex va = waterVertices[a];
+                const Vertex vb = waterVertices[b];
+                const Vertex vc = waterVertices[c];
+                const Vertex vd = waterVertices[d];
+                waterVertices.push_back(va);
+                waterVertices.push_back(vb);
+                waterVertices.push_back(vc);
+                waterVertices.push_back(va);
+                waterVertices.push_back(vc);
+                waterVertices.push_back(vd);
+            }
+        }
+    }
+
+    // The sea is a single quarter-ellipse fan attached to the world corner,
+    // rather than a rectangular grid. A low-frequency radial warp makes the
+    // coastline organic while keeping the surface topologically continuous.
+    constexpr int seaArcSamples = 96;
+    constexpr float seaCenterX = -15000.0f;
+    constexpr float seaCenterZ = 15000.0f;
+    constexpr float seaRadiusX = 9600.0f;
+    constexpr float seaRadiusZ = 9600.0f;
+    const float seaLevel = kSeaLevel + 0.8f + 0.04f;
+    const size_t seaCenterIndex = waterVertices.size();
+    appendWaterVertex(seaCenterX, seaLevel, seaCenterZ);
+    std::array<UINT, seaArcSamples + 1> seaArc{};
+    for (int i = 0; i <= seaArcSamples; ++i) {
+        const float angle = (std::numbers::pi_v<float> * 0.5f) *
+            static_cast<float>(i) / static_cast<float>(seaArcSamples);
+        const float warp = 1.0f + 0.035f * FbmNoise(
+            std::cos(angle) * 1.7f,
+            std::sin(angle) * 1.7f,
+            GetWorldGeneration().seed + 777);
+        const float x = seaCenterX + seaRadiusX * warp * std::cos(angle);
+        const float z = seaCenterZ - seaRadiusZ * warp * std::sin(angle);
+        seaArc[i] = static_cast<UINT>(waterVertices.size());
+        appendWaterVertex(x, seaLevel, z);
+    }
+    for (int i = 0; i < seaArcSamples; ++i) {
+        const Vertex center = waterVertices[seaCenterIndex];
+        const Vertex a = waterVertices[seaArc[i]];
+        const Vertex b = waterVertices[seaArc[i + 1]];
+        waterVertices.push_back(center);
+        waterVertices.push_back(a);
+        waterVertices.push_back(b);
+    }
+
+    const UINT waterBufferSize = static_cast<UINT>(waterVertices.size() * sizeof(Vertex));
+    bufferDescription.Width = waterBufferSize;
+    ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&waterVertexBuffer_)));
+    void* waterVertexData{};
+    ThrowIfFailed(waterVertexBuffer_->Map(0, nullptr, &waterVertexData));
+    std::memcpy(waterVertexData, waterVertices.data(), waterBufferSize);
+    waterVertexBuffer_->Unmap(0, nullptr);
+    waterVertexBufferView_ = {
+        waterVertexBuffer_->GetGPUVirtualAddress(),
+        waterBufferSize,
+        sizeof(Vertex)
+    };
+    waterVertexCount_ = static_cast<UINT>(waterVertices.size());
+
     // ---------- Constant buffer ----------
     bufferDescription.Width = sizeof(SceneConstants);
     ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
@@ -1201,12 +1333,12 @@ void Renderer::Render() {
     commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
     commandList_->DrawInstanced(vertexCount_, 1, 0, 0);
 
-    // Draw the exact same terrain mesh a second time as the water state.
-    // The water shader clips dry vertices and lifts submerged vertices to their
-    // local water level, so there is no independent river/sea geometry to tear.
+    // Water is one continuous set of spline/shore surfaces, not a copy of
+    // the terrain grid. This keeps the shoreline smooth even though the
+    // landscape itself remains a relatively coarse 256x256 height field.
     commandList_->SetPipelineState(waterPipelineState_.Get());
-    commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
-    commandList_->DrawInstanced(vertexCount_, 1, 0, 0);
+    commandList_->IASetVertexBuffers(0, 1, &waterVertexBufferView_);
+    commandList_->DrawInstanced(waterVertexCount_, 1, 0, 0);
 
     shadowBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     shadowBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
