@@ -22,6 +22,7 @@ namespace {
 constexpr float kWorldSize = 30000.0f;
 constexpr float kWorldHalfSize = kWorldSize * 0.5f;
 constexpr float kSeaLevel = -8.0f;
+constexpr float kSeaWaterThreshold = 0.52f;
 constexpr int kHydrologyResolution = 160;
 constexpr int kRiverCount = 4;
 constexpr int kRiverPathPoints = 40;
@@ -91,9 +92,22 @@ float RidgedNoise(float x, float z, std::uint64_t seed) {
 }
 
 float SeaMask(float x, float z) {
-    const float cornerX = SmoothStep(-15000.0f, -8500.0f, -x);
-    const float cornerZ = SmoothStep(8500.0f, 15000.0f, z);
-    return cornerX * cornerZ;
+    // The sea occupies a rounded corner basin rather than a rectangular patch.
+    // A smooth ellipse gives the coastline a continuous curved boundary.
+    constexpr float seaCenterX = -15000.0f;
+    constexpr float seaCenterZ = 15000.0f;
+    constexpr float seaRadiusX = 9600.0f;
+    constexpr float seaRadiusZ = 9600.0f;
+
+    const float nx = (x - seaCenterX) / seaRadiusX;
+    const float nz = (z - seaCenterZ) / seaRadiusZ;
+    const float ellipseDistance = std::sqrt(nx * nx + nz * nz);
+
+    // Low-frequency distortion breaks the perfect quarter-circle without
+    // turning the coast into noisy fragments.
+    const float coastlineWarp =
+        0.055f * FbmNoise(x * 0.00022f, z * 0.00022f, 0x6A09E667F3BCC909ULL);
+    return 1.0f - SmoothStep(0.82f, 1.02f, ellipseDistance - coastlineWarp);
 }
 
 float BaseTerrainHeight(float x, float z, std::uint64_t seed) {
@@ -263,7 +277,7 @@ WorldGenerationData GenerateWorld() {
         for (int step = 0; step < cellCount; ++step) {
             const int px = probe % size;
             const int pz = probe / size;
-            if (SeaMask(worldX(px), worldZ(pz)) > 0.55f) {
+            if (SeaMask(worldX(px), worldZ(pz)) > kSeaWaterThreshold) {
                 reachesSea = true;
                 break;
             }
@@ -299,7 +313,7 @@ WorldGenerationData GenerateWorld() {
             trace.push_back(cell);
             const int cx = cell % size;
             const int cz = cell / size;
-            if (SeaMask(worldX(cx), worldZ(cz)) > 0.55f) break;
+            if (SeaMask(worldX(cx), worldZ(cz)) > kSeaWaterThreshold) break;
             const int next = flow[cell];
             if (next < 0 || next == cell) break;
             cell = next;
@@ -351,7 +365,9 @@ WorldGenerationData GenerateWorld() {
             river.waterLevels[i] = std::max(kSeaLevel + 1.2f, water);
             previousWater = river.waterLevels[i];
         }
-        river.waterLevels[river.pathCount - 1] = kSeaLevel + 1.2f;
+        // The final river station is exactly the sea surface, so the mouth
+        // cannot end on a visible vertical step or a strip of dry land.
+        river.waterLevels[river.pathCount - 1] = kSeaLevel + 0.8f;
     }
 
     return world;
@@ -1041,7 +1057,7 @@ void Renderer::CreateAssets() {
             const float z1 = seaMinZ + (seaMaxZ - seaMinZ) * static_cast<float>(z + 1) / seaSegmentsZ;
             const float cx = (x0 + x1) * 0.5f;
             const float cz = (z0 + z1) * 0.5f;
-            if (SeaMask(cx, cz) < 0.58f) continue;
+            if (SeaMask(cx, cz) < kSeaWaterThreshold) continue;
 
             appendWaterVertex(x0, seaSurface, z0);
             appendWaterVertex(x1, seaSurface, z0);
@@ -1188,6 +1204,7 @@ void Renderer::Render() {
     mappedConstants_->cameraPosition[0] = cameraPosition_.x;
     mappedConstants_->cameraPosition[1] = cameraPosition_.y;
     mappedConstants_->cameraPosition[2] = cameraPosition_.z;
+    mappedConstants_->cameraOrbitDistance = cameraOrbitDistance_;
 
     ThrowIfFailed(commandAllocator_->Reset());
     ThrowIfFailed(commandList_->Reset(commandAllocator_.Get(), pipelineState_.Get()));

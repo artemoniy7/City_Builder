@@ -8,6 +8,8 @@ cbuffer SceneConstants : register(b0)
     float waterPadding;
     float3 cameraPosition;
     float cameraPadding;
+    float cameraOrbitDistance;
+    float waterLodPadding;
 };
 
 Texture2D shadowMap : register(t0);
@@ -111,9 +113,9 @@ float3 DisplaceWater(float3 position)
     const float2 directionB = normalize(float2(-0.42f, 0.91f));
     const float2 directionC = normalize(float2(0.18f, -0.98f));
 
-    WaveResult waveA = ApplyWave(position, directionA, 10.0f, 0.38f, 0.48f, 1.05f);
-    WaveResult waveB = ApplyWave(waveA.position, directionB, 5.2f, 0.17f, 0.35f, 0.78f);
-    WaveResult waveC = ApplyWave(waveB.position, directionC, 2.8f, 0.07f, 0.22f, 1.35f);
+    WaveResult waveA = ApplyWave(position, directionA, 10.0f, 0.48f, 0.48f, 1.05f);
+    WaveResult waveB = ApplyWave(waveA.position, directionB, 5.2f, 0.22f, 0.35f, 0.78f);
+    WaveResult waveC = ApplyWave(waveB.position, directionC, 2.8f, 0.09f, 0.22f, 1.35f);
     return waveC.position;
 }
 
@@ -126,7 +128,9 @@ PixelInput WaterVS(VertexInput input)
 
     // At a strategic-map distance the individual wave geometry is no longer
     // useful. Keep the surface flat and skip all Gerstner/normal calculations.
-    const bool useStaticWater = cameraDistance >= 5500.0f;
+    // LOD follows the actual zoom radius, not the distance to a particular
+    // river vertex. This keeps waves visible whenever the player zooms in.
+    const bool useStaticWater = cameraOrbitDistance >= 5500.0f;
     const float3 world = useStaticWater ? input.position : DisplaceWater(input.position);
 
     float3 surfaceNormal = input.normal;
@@ -156,7 +160,7 @@ float4 PSWater(PixelInput input) : SV_TARGET
 
     // Match the vertex-stage cutoff: distant rivers and the sea are rendered
     // as a single flat water color instead of animated waves.
-    if (cameraDistance >= 5500.0f)
+    if (cameraOrbitDistance >= 5500.0f)
         return float4(input.color, 1.0f);
 
     const float3 normal = normalize(input.normal);
