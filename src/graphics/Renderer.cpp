@@ -1097,12 +1097,12 @@ void Renderer::CreateAssets() {
                 // The water buffer is a non-indexed triangle list. Both
                 // triangles use the exact same grid coordinates, so adjacent
                 // quads cannot open a visible crack.
-                waterVertices.push_back(va);
-                waterVertices.push_back(vb);
-                waterVertices.push_back(vc);
-                waterVertices.push_back(va);
-                waterVertices.push_back(vc);
-                waterVertices.push_back(vd);
+                waterVertices.push_back(a);
+                waterVertices.push_back(b);
+                waterVertices.push_back(c);
+                waterVertices.push_back(a);
+                waterVertices.push_back(c);
+                waterVertices.push_back(d);
             }
         }
     }
