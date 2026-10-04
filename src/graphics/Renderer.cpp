@@ -24,7 +24,7 @@ constexpr float kWorldHalfSize = kWorldSize * 0.5f;
 constexpr float kSeaLevel = -8.0f;
 constexpr int kHydrologyResolution = 128;
 constexpr int kRiverCount = 4;
-constexpr int kRiverPathPoints = 64;
+constexpr int kRiverPathPoints = 32;
 
 struct RiverDefinition {
     std::array<city::math::Vector3, kRiverPathPoints> path{};
@@ -247,6 +247,22 @@ WorldGenerationData GenerateWorld() {
         const float z = worldZ(sz);
         if (raw[source] < 150.0f || SeaMask(x, z) > 0.05f || accumulation[source] < 12) continue;
 
+        // Only accept headwaters whose actual D8 route reaches the generated sea.
+        int probe = source;
+        bool reachesSea = false;
+        for (int step = 0; step < cellCount; ++step) {
+            const int px = probe % size;
+            const int pz = probe / size;
+            if (SeaMask(worldX(px), worldZ(pz)) > 0.55f) {
+                reachesSea = true;
+                break;
+            }
+            const int next = flow[probe];
+            if (next < 0 || next == probe) break;
+            probe = next;
+        }
+        if (!reachesSea) continue;
+
         bool separated = true;
         for (const int selected : sources) {
             const float ddx = x - worldX(selected % size);
@@ -281,7 +297,8 @@ WorldGenerationData GenerateWorld() {
         }
 
         river.pathCount = std::max(count, 2);
-        std::reverse(river.path.begin(), river.path.begin() + river.pathCount);
+        // Keep the traced order: source -> downstream mouth. This also keeps
+        // the water-level profile monotonic in the same direction.
 
         // Smooth the coarse D8 staircase while retaining the hydrological route.
         for (int i = 1; i + 1 < river.pathCount; ++i) {
