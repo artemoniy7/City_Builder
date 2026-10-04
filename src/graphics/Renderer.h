@@ -40,6 +40,8 @@ private:
         float waterPadding{};
         float cameraPosition[3]{};
         float cameraPadding{};
+        float cameraOrbitDistance{};
+        float waterLodPadding{};
     };
 
     void CreateDeviceResources();
