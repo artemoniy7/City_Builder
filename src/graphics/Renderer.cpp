@@ -426,8 +426,13 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     if (GetAsyncKeyState('D') & 0x8000) cameraTarget_ = cameraTarget_ + right * speed;
     if (GetAsyncKeyState('R') & 0x8000) cameraTarget_.y += speed;
     if (GetAsyncKeyState('F') & 0x8000) cameraTarget_.y -= speed;
-    if (GetAsyncKeyState('T') & 0x8000) cameraPitch_ += turnSpeed;
-    if (GetAsyncKeyState('G') & 0x8000) cameraPitch_ -= turnSpeed;
+    // T/G now control zoom vertically instead of changing the camera pitch.
+    // This keeps zooming consistent with the mouse wheel: the camera moves
+    // along its orbit and therefore naturally rises/falls with the current pitch.
+    constexpr float zoomKeySpeed = 24.0f;
+    if (GetAsyncKeyState('T') & 0x8000) cameraOrbitDistance_ -= zoomKeySpeed * deltaSeconds;
+    if (GetAsyncKeyState('G') & 0x8000) cameraOrbitDistance_ += zoomKeySpeed * deltaSeconds;
+    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 160.0f);
 
     // Keep the view between horizontal and straight down; the camera cannot look above the horizon.
     cameraPitch_ = std::clamp(cameraPitch_, -std::numbers::pi_v<float> * 0.5f, 0.0f);
@@ -450,6 +455,9 @@ void Renderer::UpdateCamera(float deltaSeconds) {
 }
 
 void Renderer::OnMouseWheel(short delta) {
+    // Use the same multiplicative zoom model as city-builder cameras:
+    // each wheel notch moves the camera by a consistent percentage of its
+    // current distance, making both close and distant zooming predictable.
     constexpr float zoomStep = 1.15f;
     if (delta > 0) cameraOrbitDistance_ /= zoomStep;
     else if (delta < 0) cameraOrbitDistance_ *= zoomStep;
