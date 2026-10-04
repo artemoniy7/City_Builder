@@ -120,25 +120,45 @@ float3 DisplaceWater(float3 position)
 PixelInput WaterVS(VertexInput input)
 {
     PixelInput output;
-    const float3 world = DisplaceWater(input.position);
+    const float cameraDistance = distance(
+        float3(cameraPosition[0], cameraPosition[1], cameraPosition[2]),
+        input.position);
 
-    // Sample the deformed surface a tiny distance away in both axes to get the
-    // true normal of the animated wave geometry.
-    const float sampleOffset = 0.12f;
-    const float3 offsetX = DisplaceWater(input.position + float3(sampleOffset, 0.0f, 0.0f));
-    const float3 offsetZ = DisplaceWater(input.position + float3(0.0f, 0.0f, sampleOffset));
-    const float3 waveNormal = normalize(cross(offsetZ - world, offsetX - world));
+    // At a strategic-map distance the individual wave geometry is no longer
+    // useful. Keep the surface flat and skip all Gerstner/normal calculations.
+    const bool useStaticWater = cameraDistance >= 5500.0f;
+    const float3 world = useStaticWater ? input.position : DisplaceWater(input.position);
+
+    float3 surfaceNormal = input.normal;
+    if (!useStaticWater)
+    {
+        // Sample the deformed surface a tiny distance away in both axes to get
+        // the true normal of the animated wave geometry.
+        const float sampleOffset = 0.12f;
+        const float3 offsetX = DisplaceWater(input.position + float3(sampleOffset, 0.0f, 0.0f));
+        const float3 offsetZ = DisplaceWater(input.position + float3(0.0f, 0.0f, sampleOffset));
+        surfaceNormal = normalize(cross(offsetZ - world, offsetX - world));
+    }
 
     output.position = mul(float4(world, 1.0f), viewProjection);
     output.worldPosition = world;
     output.color = input.color;
-    output.normal = waveNormal;
+    output.normal = surfaceNormal;
     output.shadowPosition = 0.0f;
     return output;
 }
 
 float4 PSWater(PixelInput input) : SV_TARGET
 {
+    const float cameraDistance = distance(
+        float3(cameraPosition[0], cameraPosition[1], cameraPosition[2]),
+        input.worldPosition);
+
+    // Match the vertex-stage cutoff: distant rivers and the sea are rendered
+    // as a single flat water color instead of animated waves.
+    if (cameraDistance >= 5500.0f)
+        return float4(input.color, 1.0f);
+
     const float3 normal = normalize(input.normal);
     const float3 viewDirection = normalize(float3(cameraPosition[0], cameraPosition[1], cameraPosition[2]) - input.worldPosition);
     const float3 sunDirection = normalize(lightDirection);
@@ -147,7 +167,6 @@ float4 PSWater(PixelInput input) : SV_TARGET
     const float diffuse = 0.15f + 0.25f * saturate(dot(normal, sunDirection));
     const float specular = pow(saturate(dot(reflect(-sunDirection, normal), viewDirection)), 72.0f);
 
-    // A small amount of moving surface variation breaks up the perfectly uniform water color.
     const float rippleA = sin(dot(input.worldPosition.xz, float2(0.45f, 0.23f)) + timeSeconds * 1.7f);
     const float rippleB = sin(dot(input.worldPosition.xz, float2(-0.31f, 0.52f)) - timeSeconds * 1.2f);
     const float microRipples = 0.5f + 0.5f * rippleA * rippleB;
@@ -158,7 +177,5 @@ float4 PSWater(PixelInput input) : SV_TARGET
     const float3 baseColor = lerp(deepWater, reflectedColor, 0.18f + fresnel * 0.70f);
     const float3 finalColor = baseColor * diffuse + specular * float3(0.95f, 0.98f, 1.0f);
 
-    // The river is a solid continuous surface. Do not blend the terrain through it;
-    // the wave geometry itself provides the visible depth and surface variation.
     return float4(finalColor, 1.0f);
 }
