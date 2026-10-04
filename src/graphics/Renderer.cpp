@@ -443,13 +443,14 @@ void Renderer::CreateAssets() {
     std::vector<Vertex> waterVertices;
     constexpr int riverSegments = 56;
     constexpr int riverWidthSegments = 8;
-    constexpr float riverStartZ = -260.0f;
-    constexpr float riverEndZ = 100.0f;
-    constexpr float riverWidth = 20.0f;
-    constexpr float waterClearance = 0.65f;
+    constexpr float riverStartZ = -230.0f;
+    constexpr float riverEndZ = 90.0f;
+    constexpr float riverWidth = 24.0f;
+    constexpr float waterClearance = 0.90f;
+    constexpr float riverBankOverlap = 2.0f;
 
     const auto riverCenter = [](float z) {
-        return 300.0f + 18.0f * std::sin(z * 0.025f);
+        return 330.0f + 12.0f * std::sin(z * 0.022f);
     };
 
     const auto appendWaterVertex = [&waterVertices](float x, float z) {
@@ -485,12 +486,27 @@ void Renderer::CreateAssets() {
             const float rightX1 = centerX1 + side.x * riverWidth * w1;
             const float rightZ1 = z1 + side.z * riverWidth * w1;
 
-            appendWaterVertex(leftX0, leftZ0);
-            appendWaterVertex(rightX0, rightZ0);
-            appendWaterVertex(rightX1, rightZ1);
-            appendWaterVertex(leftX0, leftZ0);
-            appendWaterVertex(rightX1, rightZ1);
-            appendWaterVertex(leftX1, leftZ1);
+            // Extend the outer river rows slightly under the terrain so
+            // sloped banks do not expose thin gaps beside the animated waves.
+            const bool isOuterEdge = widthSegment == 0 || widthSegment == riverWidthSegments - 1;
+            const float overlap = isOuterEdge ? riverBankOverlap : 0.0f;
+            const float edgeSign = widthSegment == 0 ? -1.0f : 1.0f;
+
+            const float bankLeftX0 = leftX0 + side.x * edgeSign * overlap;
+            const float bankLeftZ0 = leftZ0 + side.z * edgeSign * overlap;
+            const float bankRightX0 = rightX0 + side.x * edgeSign * overlap;
+            const float bankRightZ0 = rightZ0 + side.z * edgeSign * overlap;
+            const float bankLeftX1 = leftX1 + side.x * edgeSign * overlap;
+            const float bankLeftZ1 = leftZ1 + side.z * edgeSign * overlap;
+            const float bankRightX1 = rightX1 + side.x * edgeSign * overlap;
+            const float bankRightZ1 = rightZ1 + side.z * edgeSign * overlap;
+
+            appendWaterVertex(bankLeftX0, bankLeftZ0);
+            appendWaterVertex(bankRightX0, bankRightZ0);
+            appendWaterVertex(bankRightX1, bankRightZ1);
+            appendWaterVertex(bankLeftX0, bankLeftZ0);
+            appendWaterVertex(bankRightX1, bankRightZ1);
+            appendWaterVertex(bankLeftX1, bankLeftZ1);
         }
     }
 
