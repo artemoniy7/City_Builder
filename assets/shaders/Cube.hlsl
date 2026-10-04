@@ -186,8 +186,10 @@ float4 PSWater(PixelInput input) : SV_TARGET
     const float3 deepColor = float3(0.008f, 0.095f, 0.15f);
     const float3 sunColor = float3(1.0f, 0.86f, 0.58f);
 
-    // TerrainHeight is baked into the water mesh as waterDepth. This avoids a
-    // second terrain texture while still giving every water pixel a local depth.
+    // Signed waterDepth is baked into every terrain vertex. Positive values
+    // mean the vertex is submerged; negative values are dry land. This avoids
+    // a second mesh or terrain texture while still giving every water pixel a
+    // local depth.
     // Normalize the terrain-derived depth so the material has a predictable
     // shallow-to-deep transition across both rivers and the sea.
     const float maxDepth = 20.0f;
