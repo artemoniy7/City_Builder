@@ -508,6 +508,36 @@ float RiverSampleValue(const RiverDefinition& river, float pathT, const std::arr
     return values[i0] * (1.0f - t) + values[i1] * t;
 }
 
+float WaterLevelAt(float x, float z) {
+    // The same terrain vertex can represent land, river water, or sea water.
+    // Returning a value well below the terrain for dry land makes waterDepth
+    // a signed state that the two material passes can use without a second mesh.
+    float waterLevel = kSeaLevel - 1000.0f;
+
+    if (SeaMask(x, z) >= kSeaWaterThreshold)
+        waterLevel = kSeaLevel + 0.8f;
+
+    const auto& world = GetWorldGeneration();
+    for (const auto& river : world.rivers) {
+        if (river.pathCount < 2) continue;
+
+        float nearestT = 0.0f;
+        const float nearestDistance = DistanceToRiverCurve(
+            x, z, river, nearestT);
+        const float riverWidth = RiverSampleValue(
+            river, nearestT, river.widths);
+        const float waterFootprint = riverWidth * 1.70f;
+
+        if (nearestDistance <= waterFootprint) {
+            waterLevel = std::max(
+                waterLevel,
+                RiverSampleValue(river, nearestT, river.waterLevels));
+        }
+    }
+
+    return waterLevel;
+}
+
 float TerrainHeight(float x, float z) {
     const auto& world = GetWorldGeneration();
     float height = BaseTerrainHeight(x, z, world.seed);
@@ -905,6 +935,7 @@ void Renderer::CreateAssets() {
     const float cellSize = terrainSize / kTerrainResolution;
     const auto appendTerrainVertex = [&vertices](float x, float z) {
         const float height = TerrainHeight(x, z);
+        const float waterDepth = WaterLevelAt(x, z) - height;
         const auto normal = TerrainNormal(x, z);
         const float slope = 1.0f - normal.y;
         const bool riverSandBank = height < 4.0f && height > -18.0f;
@@ -935,7 +966,12 @@ void Renderer::CreateAssets() {
         color[2] = color[2] * (1.0f - snowCoverage) + snowCoverage;
 
         for (float& channel : color) channel = std::clamp(channel, 0.0f, 1.0f);
-        vertices.push_back({{x, height, z}, {color[0], color[1], color[2]}, {normal.x, normal.y, normal.z}});
+        vertices.push_back({
+            {x, height, z},
+            {color[0], color[1], color[2]},
+            {normal.x, normal.y, normal.z},
+            waterDepth
+        });
     };
     vertices.reserve(vertices.size() + kTerrainResolution * kTerrainResolution * 6);
     for (UINT z = 0; z < kTerrainResolution; ++z) {
@@ -975,118 +1011,9 @@ void Renderer::CreateAssets() {
 
     vertexBufferView_ = {vertexBuffer_->GetGPUVirtualAddress(), bufferSize, sizeof(Vertex)};
 
-    // ---------- Rivers + sea ----------
-    std::vector<Vertex> waterVertices;
-
-    const auto appendWaterVertex = [&waterVertices](float x, float y, float z) {
-        constexpr std::array<float, 3> waterColor{0.05f, 0.42f, 0.50f};
-        const float terrainHeight = TerrainHeight(x, z);
-        const float waterDepth = std::max(y - terrainHeight, 0.0f);
-        waterVertices.push_back({
-            {x, y, z},
-            {waterColor[0], waterColor[1], waterColor[2]},
-            {0.0f, 1.0f, 0.0f},
-            waterDepth
-        });
-    };
-
-    const auto sampleRiverPoint = [](const RiverDefinition& river, float t) {
-        return RiverCurvePoint(river, t);
-    };
-
-    // Dense longitudinal sampling makes the river visually curved instead of
-    // revealing the original low-resolution hydrology grid.
-    constexpr int riverSegments = 112;
-    constexpr int riverWidthSegments = 10;
-
-    for (const auto& river : GetWorldGeneration().rivers) {
-        if (river.pathCount < 2) continue;
-        const int rowWidth = riverWidthSegments + 1;
-        std::vector<math::Vector3> grid(
-            static_cast<size_t>(riverSegments + 1) * rowWidth);
-
-        const auto gridIndex = [rowWidth](int row, int column) {
-            return static_cast<size_t>(row) * rowWidth + column;
-        };
-
-        for (int row = 0; row <= riverSegments; ++row) {
-            const float t = static_cast<float>(row) / riverSegments;
-            const math::Vector3 center = sampleRiverPoint(river, t);
-            const math::Vector3 before = sampleRiverPoint(river, std::max(0.0f, t - 0.02f));
-            const math::Vector3 after = sampleRiverPoint(river, std::min(1.0f, t + 0.02f));
-            const math::Vector3 tangent = math::Normalize(
-                {after.x - before.x, 0.0f, after.z - before.z});
-            const math::Vector3 side{-tangent.z, 0.0f, tangent.x};
-            const float width = RiverSampleValue(river, t, river.widths);
-            const float waterLevel = RiverSampleValue(river, t, river.waterLevels);
-
-            for (int column = 0; column <= riverWidthSegments; ++column) {
-                const float across =
-                    (static_cast<float>(column) / riverWidthSegments - 0.5f) * width * 2.0f;
-                grid[gridIndex(row, column)] = {
-                    center.x + side.x * across,
-                    waterLevel,
-                    center.z + side.z * across
-                };
-            }
-        }
-
-        for (int row = 0; row < riverSegments; ++row) {
-            for (int column = 0; column < riverWidthSegments; ++column) {
-                const auto& a = grid[gridIndex(row, column)];
-                const auto& b = grid[gridIndex(row, column + 1)];
-                const auto& c = grid[gridIndex(row + 1, column + 1)];
-                const auto& d = grid[gridIndex(row + 1, column)];
-                appendWaterVertex(a.x, a.y, a.z);
-                appendWaterVertex(b.x, b.y, b.z);
-                appendWaterVertex(c.x, c.y, c.z);
-                appendWaterVertex(a.x, a.y, a.z);
-                appendWaterVertex(c.x, c.y, c.z);
-                appendWaterVertex(d.x, d.y, d.z);
-            }
-        }
-    }
-
-    // One coarse continuous sea surface in the north-west corner.
-    constexpr int seaSegmentsX = 72;
-    constexpr int seaSegmentsZ = 72;
-    constexpr float seaMinX = -15000.0f;
-    constexpr float seaMaxX = -6000.0f;
-    constexpr float seaMinZ = 6000.0f;
-    constexpr float seaMaxZ = 15000.0f;
-    constexpr float seaSurface = kSeaLevel + 0.8f;
-
-    for (int z = 0; z < seaSegmentsZ; ++z) {
-        for (int x = 0; x < seaSegmentsX; ++x) {
-            const float x0 = seaMinX + (seaMaxX - seaMinX) * static_cast<float>(x) / seaSegmentsX;
-            const float x1 = seaMinX + (seaMaxX - seaMinX) * static_cast<float>(x + 1) / seaSegmentsX;
-            const float z0 = seaMinZ + (seaMaxZ - seaMinZ) * static_cast<float>(z) / seaSegmentsZ;
-            const float z1 = seaMinZ + (seaMaxZ - seaMinZ) * static_cast<float>(z + 1) / seaSegmentsZ;
-            const float cx = (x0 + x1) * 0.5f;
-            const float cz = (z0 + z1) * 0.5f;
-            if (SeaMask(cx, cz) < kSeaWaterThreshold) continue;
-
-            appendWaterVertex(x0, seaSurface, z0);
-            appendWaterVertex(x1, seaSurface, z0);
-            appendWaterVertex(x1, seaSurface, z1);
-            appendWaterVertex(x0, seaSurface, z0);
-            appendWaterVertex(x1, seaSurface, z1);
-            appendWaterVertex(x0, seaSurface, z1);
-        }
-    }
-
-    const UINT waterBufferSize = static_cast<UINT>(waterVertices.size() * sizeof(Vertex));
-    bufferDescription.Width = waterBufferSize;
-    ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&waterVertexBuffer_)));
-
-    void* waterVertexData{};
-    ThrowIfFailed(waterVertexBuffer_->Map(0, nullptr, &waterVertexData));
-    std::memcpy(waterVertexData, waterVertices.data(), waterBufferSize);
-    waterVertexBuffer_->Unmap(0, nullptr);
-    waterVertexBufferView_ = {waterVertexBuffer_->GetGPUVirtualAddress(), waterBufferSize, sizeof(Vertex)};
-    waterVertexCount_ = static_cast<UINT>(waterVertices.size());
-
+    // Water is not a second geometry anymore. The terrain vertex buffer
+    // carries signed waterDepth for the water material pass.
+    
     // ---------- Constant buffer ----------
     bufferDescription.Width = sizeof(SceneConstants);
     ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
