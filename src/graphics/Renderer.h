@@ -28,7 +28,7 @@ public:
 private:
     static constexpr UINT kFrameCount = 2;
     static constexpr UINT kShadowMapSize = 2048;
-    static constexpr UINT kTerrainResolution = 256;
+    static constexpr UINT kTerrainResolution = 128;
 
     struct Vertex { float position[3]; float color[3]; float normal[3]; };
     struct alignas(256) SceneConstants {
@@ -59,7 +59,7 @@ private:
     std::chrono::steady_clock::time_point lastFrameAt_{std::chrono::steady_clock::now()};
     math::Vector3 cameraPosition_{0.0f, 10.0f, -16.0f};
     math::Vector3 cameraTarget_{0.0f, 0.0f, 0.0f};
-    float cameraOrbitDistance_{1200.0f};
+    float cameraOrbitDistance_{18.0f};
     float cameraYaw_{0.0f};
     float cameraPitch_{-0.576f};
     float fieldOfView_{0.95f};
