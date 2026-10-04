@@ -957,13 +957,18 @@ void Renderer::CreateAssets() {
 }
 
 void Renderer::UpdateCamera(float deltaSeconds) {
-    // Pan speed grows with zoom distance, similar to city-builder camera controls:
-    // a distant camera needs to cross much more world space per second.
+    // Pan speed grows non-linearly with zoom distance. At close range the
+    // camera stays controllable, while at the far 30 km view it can cross
+    // the whole map in only a few seconds.
     constexpr float baseMoveSpeed = 8.0f;
     constexpr float referenceOrbitDistance = 18.0f;
-    constexpr float maxMoveSpeedMultiplier = 12.0f;
-    const float zoomSpeedMultiplier = std::clamp(
+    constexpr float distantSpeedExponent = 1.10f;
+    constexpr float maxMoveSpeedMultiplier = 750.0f;
+    const float normalizedDistance = std::max(
         cameraOrbitDistance_ / referenceOrbitDistance,
+        1.0f);
+    const float zoomSpeedMultiplier = std::clamp(
+        std::pow(normalizedDistance, distantSpeedExponent),
         1.0f,
         maxMoveSpeedMultiplier);
     const float speed = baseMoveSpeed * zoomSpeedMultiplier * deltaSeconds;
