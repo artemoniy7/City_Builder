@@ -103,23 +103,29 @@ WaveResult ApplyWave(float3 position, float2 direction, float wavelength, float 
     return result;
 }
 
-PixelInput WaterVS(VertexInput input)
+float3 DisplaceWater(float3 position)
 {
-    PixelInput output;
-    float3 world = input.position;
-
     const float2 directionA = normalize(float2(0.86f, 0.51f));
     const float2 directionB = normalize(float2(-0.42f, 0.91f));
     const float2 directionC = normalize(float2(0.18f, -0.98f));
 
-    WaveResult waveA = ApplyWave(world, directionA, 10.0f, 0.38f, 0.48f, 1.05f);
+    WaveResult waveA = ApplyWave(position, directionA, 10.0f, 0.38f, 0.48f, 1.05f);
     WaveResult waveB = ApplyWave(waveA.position, directionB, 5.2f, 0.17f, 0.35f, 0.78f);
     WaveResult waveC = ApplyWave(waveB.position, directionC, 2.8f, 0.07f, 0.22f, 1.35f);
+    return waveC.position;
+}
 
-    world = waveC.position;
-    const float3 tangentX = waveA.tangentX + waveB.tangentX + waveC.tangentX;
-    const float3 tangentZ = waveA.tangentZ + waveB.tangentZ + waveC.tangentZ;
-    const float3 waveNormal = normalize(cross(tangentZ, tangentX));
+PixelInput WaterVS(VertexInput input)
+{
+    PixelInput output;
+    const float3 world = DisplaceWater(input.position);
+
+    // Sample the deformed surface a tiny distance away in both axes to get the
+    // true normal of the animated wave geometry.
+    const float sampleOffset = 0.12f;
+    const float3 offsetX = DisplaceWater(input.position + float3(sampleOffset, 0.0f, 0.0f));
+    const float3 offsetZ = DisplaceWater(input.position + float3(0.0f, 0.0f, sampleOffset));
+    const float3 waveNormal = normalize(cross(offsetZ - world, offsetX - world));
 
     output.position = mul(float4(world, 1.0f), viewProjection);
     output.worldPosition = world;
