@@ -39,81 +39,25 @@ float TerrainNoise(float x, float z) {
 
 city::math::Vector3 ResolveCameraTerrainCollision(const city::math::Vector3& target, const city::math::Vector3& desiredPosition) {
     constexpr float clearance = 2.0f;
-    constexpr int samples = 64;
+    constexpr int samples = 96;
 
     const city::math::Vector3 direction = desiredPosition - target;
 
-    const auto isSafe = [clearance](const city::math::Vector3& position) {
-        return position.y >= TerrainHeight(position.x, position.z) + clearance;
-    };
-
-    // If the desired camera position is clear, it is still possible for the
-    // orbit path to pass through a mountain. Check the whole segment.
-    if (isSafe(target) && isSafe(desiredPosition)) {
-        city::math::Vector3 previous = target;
-        for (int i = 1; i <= samples; ++i) {
-            const float t = static_cast<float>(i) / samples;
-            const city::math::Vector3 current = target + direction * t;
-            if (!isSafe(current)) {
-                float low = static_cast<float>(i - 1) / samples;
-                float high = t;
-                // Find the terrain boundary to sub-sample precision.
-                for (int iteration = 0; iteration < 8; ++iteration) {
-                    const float middle = (low + high) * 0.5f;
-                    if (isSafe(target + direction * middle)) low = middle;
-                    else high = middle;
-                }
-                const float safeT = std::max(0.0f, low - 0.01f);
-                return target + direction * safeT;
-            }
-            previous = current;
-        }
-        return desiredPosition;
+    // Treat the terrain surface between the target and camera as the dynamic
+    // collision plane. This lets the camera climb with a mountain instead of
+    // stopping at the first point where the old orbit intersects the terrain.
+    float highestSurface = TerrainHeight(target.x, target.z);
+    for (int i = 1; i <= samples; ++i) {
+        const float t = static_cast<float>(i) / samples;
+        const float x = target.x + direction.x * t;
+        const float z = target.z + direction.z * t;
+        highestSurface = std::max(highestSurface, TerrainHeight(x, z));
     }
 
-    // If the desired point is inside terrain, move back along the orbit until
-    // the camera is safely outside it. This makes zooming stop at the mountain.
-    if (!isSafe(desiredPosition)) {
-        float low = 0.0f;
-        float high = 1.0f;
-        if (isSafe(target)) {
-            for (int iteration = 0; iteration < 16; ++iteration) {
-                const float middle = (low + high) * 0.5f;
-                if (isSafe(target + direction * middle)) low = middle;
-                else high = middle;
-            }
-            return target + direction * std::max(0.0f, low - 0.01f);
-        }
-
-        // The target itself can be inside a mountain. Find the first safe point
-        // farther along the orbit so the camera is never left underground.
-        float previousT = 0.0f;
-        bool foundSafe = false;
-        for (int i = 1; i <= samples; ++i) {
-            const float t = static_cast<float>(i) / samples;
-            if (isSafe(target + direction * t)) {
-                low = previousT;
-                high = t;
-                foundSafe = true;
-                break;
-            }
-            previousT = t;
-        }
-        if (foundSafe) {
-            for (int iteration = 0; iteration < 16; ++iteration) {
-                const float middle = (low + high) * 0.5f;
-                if (isSafe(target + direction * middle)) high = middle;
-                else low = middle;
-            }
-            return target + direction * std::min(1.0f, high + 0.01f);
-        }
-    }
-
-    // Fallback for an exceptional case where the entire orbit segment is
-    // underground: keep the camera at the requested horizontal position but
-    // lift it just above the terrain surface.
+    const float minimumCameraHeight = highestSurface + clearance;
     city::math::Vector3 corrected = desiredPosition;
-    corrected.y = std::max(corrected.y, TerrainHeight(corrected.x, corrected.z) + clearance);
+    corrected.y = std::max(corrected.y, minimumCameraHeight);
+
     return corrected;
 }
 
