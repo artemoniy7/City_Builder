@@ -526,7 +526,7 @@ float WaterLevelAt(float x, float z) {
             x, z, river, nearestT);
         const float riverWidth = RiverSampleValue(
             river, nearestT, river.widths);
-        const float waterFootprint = riverWidth * 1.70f;
+        const float waterFootprint = std::max(riverWidth * 1.70f, 95.0f);
 
         if (nearestDistance <= waterFootprint) {
             waterLevel = std::max(
@@ -552,8 +552,11 @@ float TerrainHeight(float x, float z) {
         // than the rendered ribbon. This prevents the terrain triangulation
         // from peeking through the shoreline at any camera distance.
         const float riverWidth = RiverSampleValue(river, nearestT, river.widths);
-        const float waterWidth = riverWidth * 1.08f;
-        const float outerWidth = riverWidth * 1.70f;
+        // The terrain grid is roughly 117 m per cell at 256x256. Keep the
+        // generated river narrow in world terms, but wide enough to occupy
+        // actual terrain vertices after water becomes a terrain state.
+        const float waterWidth = std::max(riverWidth * 1.08f, 55.0f);
+        const float outerWidth = std::max(riverWidth * 1.70f, 95.0f);
         if (nearestDistance >= outerWidth) continue;
 
         const float waterLevel = RiverSampleValue(
