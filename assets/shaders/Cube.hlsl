@@ -158,6 +158,7 @@ float4 PSWater(PixelInput input) : SV_TARGET
     const float3 baseColor = lerp(deepWater, reflectedColor, 0.18f + fresnel * 0.70f);
     const float3 finalColor = baseColor * diffuse + specular * float3(0.95f, 0.98f, 1.0f);
 
-    // Keep it slightly transparent so the river still reads as a surface over the terrain.
-    return float4(finalColor, 0.90f);
+    // The river is a solid continuous surface. Do not blend the terrain through it;
+    // the wave geometry itself provides the visible depth and surface variation.
+    return float4(finalColor, 1.0f);
 }
