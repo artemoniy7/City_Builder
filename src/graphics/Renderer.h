@@ -30,7 +30,12 @@ private:
     static constexpr UINT kShadowMapSize = 2048;
     static constexpr UINT kTerrainResolution = 256;
 
-    struct Vertex { float position[3]; float color[3]; float normal[3]; };
+    struct Vertex {
+        float position[3];
+        float color[3];
+        float normal[3];
+        float waterDepth{};
+    };
     struct alignas(256) SceneConstants {
         float viewProjection[16];
         float lightViewProjection[16];
