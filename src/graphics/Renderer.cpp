@@ -24,7 +24,7 @@ float TerrainHeight(float x, float z) {
     return rollingHills + ridge + mountain;
 }
 
-city::math::Vector3 TerrainNormal(float x, float z) {
+city::city::city::math::Vector3 TerrainNormal(float x, float z) {
     constexpr float sampleDistance = 2.0f;
     const float dx = TerrainHeight(x + sampleDistance, z) - TerrainHeight(x - sampleDistance, z);
     const float dz = TerrainHeight(x, z + sampleDistance) - TerrainHeight(x, z - sampleDistance);
@@ -37,23 +37,23 @@ float TerrainNoise(float x, float z) {
     return 2.0f * (value - std::floor(value)) - 1.0f;
 }
 
-math::Vector3 ResolveCameraTerrainCollision(const math::Vector3& target, const math::Vector3& desiredPosition) {
+city::city::math::Vector3 ResolveCameraTerrainCollision(const city::city::math::Vector3& target, const city::city::math::Vector3& desiredPosition) {
     constexpr float clearance = 2.0f;
     constexpr int samples = 64;
 
-    const math::Vector3 direction = desiredPosition - target;
+    const city::city::math::Vector3 direction = desiredPosition - target;
 
-    const auto isSafe = [clearance](const math::Vector3& position) {
+    const auto isSafe = [clearance](const city::city::math::Vector3& position) {
         return position.y >= TerrainHeight(position.x, position.z) + clearance;
     };
 
     // If the desired camera position is clear, it is still possible for the
     // orbit path to pass through a mountain. Check the whole segment.
     if (isSafe(target) && isSafe(desiredPosition)) {
-        math::Vector3 previous = target;
+        city::city::math::Vector3 previous = target;
         for (int i = 1; i <= samples; ++i) {
             const float t = static_cast<float>(i) / samples;
-            const math::Vector3 current = target + direction * t;
+            const city::city::math::Vector3 current = target + direction * t;
             if (!isSafe(current)) {
                 float low = static_cast<float>(i - 1) / samples;
                 float high = t;
@@ -112,7 +112,7 @@ math::Vector3 ResolveCameraTerrainCollision(const math::Vector3& target, const m
     // Fallback for an exceptional case where the entire orbit segment is
     // underground: keep the camera at the requested horizontal position but
     // lift it just above the terrain surface.
-    math::Vector3 corrected = desiredPosition;
+    city::city::math::Vector3 corrected = desiredPosition;
     corrected.y = std::max(corrected.y, TerrainHeight(corrected.x, corrected.z) + clearance);
     return corrected;
 }
@@ -498,8 +498,8 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     if (GetAsyncKeyState('Q') & 0x8000) cameraYaw_ -= turnSpeed;
     if (GetAsyncKeyState('E') & 0x8000) cameraYaw_ += turnSpeed;
 
-    const math::Vector3 forward{std::sin(cameraYaw_), 0.0f, std::cos(cameraYaw_)};
-    const math::Vector3 right{forward.z, 0.0f, -forward.x};
+    const city::city::math::Vector3 forward{std::sin(cameraYaw_), 0.0f, std::cos(cameraYaw_)};
+    const city::city::math::Vector3 right{forward.z, 0.0f, -forward.x};
     if (GetAsyncKeyState('W') & 0x8000) cameraTarget_ = cameraTarget_ + forward * speed;
     if (GetAsyncKeyState('S') & 0x8000) cameraTarget_ = cameraTarget_ - forward * speed;
     if (GetAsyncKeyState('A') & 0x8000) cameraTarget_ = cameraTarget_ - right * speed;
@@ -528,12 +528,12 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     spaceWasDown_ = spaceDown;
 
     const float horizontalScale = std::cos(cameraPitch_);
-    const math::Vector3 offset{
+    const city::city::math::Vector3 offset{
         -std::sin(cameraYaw_) * horizontalScale * cameraOrbitDistance_,
         -std::sin(cameraPitch_) * cameraOrbitDistance_,
         -std::cos(cameraYaw_) * horizontalScale * cameraOrbitDistance_
     };
-    const math::Vector3 desiredPosition = cameraTarget_ + offset;
+    const city::city::math::Vector3 desiredPosition = cameraTarget_ + offset;
     cameraPosition_ = ResolveCameraTerrainCollision(cameraTarget_, desiredPosition);
 }
 
@@ -547,12 +547,12 @@ void Renderer::OnMouseWheel(short delta) {
     cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 160.0f);
 
     const float horizontalScale = std::cos(cameraPitch_);
-    const math::Vector3 offset{
+    const city::city::math::Vector3 offset{
         -std::sin(cameraYaw_) * horizontalScale * cameraOrbitDistance_,
         -std::sin(cameraPitch_) * cameraOrbitDistance_,
         -std::cos(cameraYaw_) * horizontalScale * cameraOrbitDistance_
     };
-    const math::Vector3 desiredPosition = cameraTarget_ + offset;
+    const city::city::math::Vector3 desiredPosition = cameraTarget_ + offset;
     cameraPosition_ = ResolveCameraTerrainCollision(cameraTarget_, desiredPosition);
 }
 
@@ -563,26 +563,26 @@ void Renderer::Render() {
     UpdateCamera(deltaSeconds);
 
     const float horizontalLookScale = std::cos(cameraPitch_);
-    const math::Vector3 lookDirection{
+    const city::city::math::Vector3 lookDirection{
         std::sin(cameraYaw_) * horizontalLookScale,
         std::sin(cameraPitch_),
         std::cos(cameraYaw_) * horizontalLookScale,
     };
-    const math::Vector3 target = cameraTarget_;
+    const city::city::math::Vector3 target = cameraTarget_;
     // A downward-facing camera needs a horizontal up vector. Deriving it from yaw keeps Q/E rotating the view.
     const bool useYawBasedUp = topDownView_ || std::abs(lookDirection.y) > 0.99f;
-    const math::Vector3 yawBasedUp{-std::cos(cameraYaw_), 0.0f, std::sin(cameraYaw_)};
-    const math::Vector3 up = useYawBasedUp ? yawBasedUp : math::Vector3{0.0f, 1.0f, 0.0f};
+    const city::city::math::Vector3 yawBasedUp{-std::cos(cameraYaw_), 0.0f, std::sin(cameraYaw_)};
+    const city::city::math::Vector3 up = useYawBasedUp ? yawBasedUp : city::city::math::Vector3{0.0f, 1.0f, 0.0f};
     const auto viewProjection = math::Matrix4::Multiply(
         math::Matrix4::LookAt(cameraPosition_, target, up),
         math::Matrix4::Perspective(fieldOfView_, static_cast<float>(width_) / height_, 0.1f, 10000.0f));
 
-    const math::Vector3 lightPosition{-14.0f, 20.0f, -12.0f};
-    const math::Vector3 lightTarget{0.0f, 0.0f, 0.0f};
+    const city::city::math::Vector3 lightPosition{-14.0f, 20.0f, -12.0f};
+    const city::city::math::Vector3 lightTarget{0.0f, 0.0f, 0.0f};
     const auto lightViewProjection = math::Matrix4::Multiply(
         math::Matrix4::LookAt(lightPosition, lightTarget, {0.0f, 1.0f, 0.0f}),
         math::Matrix4::Perspective(1.25f, 1.0f, 1.0f, 60.0f));
-    const math::Vector3 lightDirection = math::Normalize(lightPosition - lightTarget);
+    const city::city::math::Vector3 lightDirection = math::Normalize(lightPosition - lightTarget);
 
     std::memcpy(mappedConstants_->viewProjection, viewProjection.values, sizeof(viewProjection.values));
     std::memcpy(mappedConstants_->lightViewProjection, lightViewProjection.values, sizeof(lightViewProjection.values));
