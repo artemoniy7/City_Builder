@@ -362,6 +362,12 @@ const WorldGenerationData& GetWorldGeneration() {
     return world;
 }
 
+float DistanceToSegment2D(
+    float x, float z,
+    const city::math::Vector3& a,
+    const city::math::Vector3& b,
+    float& t);
+
 city::math::Vector3 RiverCurvePoint(
     const RiverDefinition& river,
     float pathT) {
