@@ -21,7 +21,38 @@ float TerrainHeight(float x, float z) {
     const float mountainDistance = (x - 210.0f) * (x - 210.0f) + (z - 170.0f) * (z - 170.0f);
     const float mountainBase = std::exp(-(210.0f * 210.0f + 170.0f * 170.0f) / 28000.0f);
     const float mountain = 115.0f * (std::exp(-mountainDistance / 28000.0f) - mountainBase);
-    return rollingHills + ridge + mountain;
+    const float baseHeight = rollingHills + ridge + mountain;
+
+    // Carve a shallow, sandy river channel into the existing lowland.
+    // The water sits above the bed, while the raised outer banks keep the
+    // shoreline physically connected to the surrounding terrain.
+    const float riverCenterX = -60.0f + 6.0f * std::sin(z * 0.018f);
+    const float riverLateralDistance = std::abs(x - riverCenterX);
+    constexpr float riverBedHalfWidth = 10.0f;
+    constexpr float riverBankHalfWidth = 22.0f;
+    constexpr float riverOuterHalfWidth = 36.0f;
+    constexpr float riverBedHeight = -7.5f;
+    constexpr float riverBankHeight = -1.0f;
+
+    if (riverLateralDistance < riverOuterHalfWidth && z > -230.0f && z < 70.0f) {
+        if (riverLateralDistance <= riverBedHalfWidth) {
+            return std::min(baseHeight, riverBedHeight);
+        }
+
+        if (riverLateralDistance <= riverBankHalfWidth) {
+            const float t = (riverLateralDistance - riverBedHalfWidth) /
+                (riverBankHalfWidth - riverBedHalfWidth);
+            const float smoothT = t * t * (3.0f - 2.0f * t);
+            return riverBedHeight + (riverBankHeight - riverBedHeight) * smoothT;
+        }
+
+        const float t = (riverLateralDistance - riverBankHalfWidth) /
+            (riverOuterHalfWidth - riverBankHalfWidth);
+        const float smoothT = t * t * (3.0f - 2.0f * t);
+        return riverBankHeight + (baseHeight - riverBankHeight) * smoothT;
+    }
+
+    return baseHeight;
 }
 
 city::math::Vector3 TerrainNormal(float x, float z) {
@@ -371,7 +402,11 @@ void Renderer::CreateAssets() {
         const float height = TerrainHeight(x, z);
         const auto normal = TerrainNormal(x, z);
         const float slope = 1.0f - normal.y;
-        const std::array<float, 3> baseColor = height < -6.0f ? std::array<float, 3>{0.76f, 0.67f, 0.35f}
+        const float riverCenterX = -60.0f + 6.0f * std::sin(z * 0.018f);
+        const bool riverSandBank =
+            std::abs(x - riverCenterX) < 36.0f && z > -230.0f && z < 70.0f;
+        const std::array<float, 3> baseColor =
+            (height < -6.0f || riverSandBank) ? std::array<float, 3>{0.76f, 0.67f, 0.35f}
             : (slope > 0.22f || height > 55.0f) ? std::array<float, 3>{0.42f, 0.43f, 0.40f}
             : (slope > 0.10f) ? std::array<float, 3>{0.38f, 0.24f, 0.13f}
             : std::array<float, 3>{0.20f, 0.55f, 0.22f};
