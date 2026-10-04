@@ -1026,7 +1026,7 @@ void Renderer::Render() {
     const math::Vector3 up = useYawBasedUp ? yawBasedUp : math::Vector3{0.0f, 1.0f, 0.0f};
     const auto viewProjection = math::Matrix4::Multiply(
         math::Matrix4::LookAt(cameraPosition_, target, up),
-        math::Matrix4::Perspective(fieldOfView_, static_cast<float>(width_) / height_, 0.1f, 10000.0f));
+        math::Matrix4::Perspective(fieldOfView_, static_cast<float>(width_) / height_, 0.1f, 40000.0f));
 
     const math::Vector3 lightPosition{-14.0f, 20.0f, -12.0f};
     const math::Vector3 lightTarget{0.0f, 0.0f, 0.0f};
