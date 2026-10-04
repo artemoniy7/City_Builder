@@ -123,6 +123,15 @@ float BaseTerrainHeight(float x, float z, std::uint64_t seed) {
     const float shelf = SmoothStep(0.05f, 0.75f, sea);
     const float seabed = -55.0f + 14.0f * FbmNoise(x * 0.00020f, z * 0.00020f, seed + 501);
     height = height * (1.0f - shelf) + seabed * shelf;
+
+    // Keep the visible sea over a genuinely submerged basin. The water surface
+    // is intentionally separated from the terrain so the shoreline cannot
+    // shimmer from nearly coplanar depth values.
+    const float submerged = SmoothStep(0.55f, 0.78f, sea);
+    const float seaDepth = 8.0f + 32.0f * SmoothStep(0.55f, 1.0f, sea);
+    const float guaranteedSeabed = kSeaLevel - seaDepth;
+    const float submergedFloor = guaranteedSeabed + 4.0f;
+    height = std::min(height, height * (1.0f - submerged) + submergedFloor * submerged);
     return height;
 }
 
@@ -402,7 +411,7 @@ float TerrainHeight(float x, float z) {
         if (nearestDistance >= outerWidth) continue;
 
         const float waterLevel = RiverSampleValue(river, nearestT, river.waterLevels);
-        const float bedDepth = 7.0f + 15.0f * nearestT;
+        const float bedDepth = 10.0f + 18.0f * nearestT;
         const float riverBed = waterLevel - bedDepth;
 
         if (nearestDistance <= riverWidth) {
@@ -686,9 +695,9 @@ void Renderer::CreateAssets() {
     auto waterPipelineDescription = pipelineDescription;
     waterPipelineDescription.VS = {waterVertexShader->GetBufferPointer(), waterVertexShader->GetBufferSize()};
     waterPipelineDescription.PS = {waterPixelShader->GetBufferPointer(), waterPixelShader->GetBufferSize()};
-    waterPipelineDescription.BlendState.RenderTarget[0].BlendEnable = TRUE;
-    waterPipelineDescription.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-    waterPipelineDescription.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    // Water is rendered as an opaque surface, so blending only adds work and
+    // can make near-coplanar terrain/water edges less stable.
+    waterPipelineDescription.BlendState.RenderTarget[0].BlendEnable = FALSE;
     waterPipelineDescription.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
     waterPipelineDescription.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
     waterPipelineDescription.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
@@ -1055,7 +1064,7 @@ void Renderer::Render() {
     const math::Vector3 up = useYawBasedUp ? yawBasedUp : math::Vector3{0.0f, 1.0f, 0.0f};
     const auto viewProjection = math::Matrix4::Multiply(
         math::Matrix4::LookAt(cameraPosition_, target, up),
-        math::Matrix4::Perspective(fieldOfView_, static_cast<float>(width_) / height_, 0.1f, 40000.0f));
+        math::Matrix4::Perspective(fieldOfView_, static_cast<float>(width_) / height_, 1.0f, 40000.0f));
 
     const math::Vector3 lightPosition{-14.0f, 20.0f, -12.0f};
     const math::Vector3 lightTarget{0.0f, 0.0f, 0.0f};
