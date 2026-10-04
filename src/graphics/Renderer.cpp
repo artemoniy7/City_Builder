@@ -31,6 +31,12 @@ city::math::Vector3 TerrainNormal(float x, float z) {
     return city::math::Normalize({-dx, sampleDistance * 2.0f, -dz});
 }
 
+float TerrainNoise(float x, float z) {
+    // Deterministic value noise: stable between runs and cheap enough for terrain generation.
+    const float value = std::sin(x * 12.9898f + z * 78.233f) * 43758.5453f;
+    return 2.0f * (value - std::floor(value)) - 1.0f;
+}
+
 std::filesystem::path ShaderPath() {
     std::array<wchar_t, MAX_PATH> executablePath{};
     GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size()));
@@ -322,10 +328,32 @@ void Renderer::CreateAssets() {
         const float height = TerrainHeight(x, z);
         const auto normal = TerrainNormal(x, z);
         const float slope = 1.0f - normal.y;
-        const std::array<float, 3> color = height < -6.0f ? std::array<float, 3>{0.76f, 0.67f, 0.35f}
+        const std::array<float, 3> baseColor = height < -6.0f ? std::array<float, 3>{0.76f, 0.67f, 0.35f}
             : (slope > 0.22f || height > 55.0f) ? std::array<float, 3>{0.42f, 0.43f, 0.40f}
             : (slope > 0.10f) ? std::array<float, 3>{0.38f, 0.24f, 0.13f}
             : std::array<float, 3>{0.20f, 0.55f, 0.22f};
+
+        // Add subtle, deterministic RGB variation so large terrain areas are not perfectly flat.
+        const float noise = TerrainNoise(x * 0.075f, z * 0.075f);
+        const float redNoise = TerrainNoise(x * 0.11f + 17.0f, z * 0.11f - 31.0f);
+        const float greenNoise = TerrainNoise(x * 0.11f - 43.0f, z * 0.11f + 7.0f);
+        const float blueNoise = TerrainNoise(x * 0.11f + 61.0f, z * 0.11f + 29.0f);
+        std::array<float, 3> color{
+            baseColor[0] * (1.0f + noise * 0.08f) + redNoise * 0.025f,
+            baseColor[1] * (1.0f + noise * 0.08f) + greenNoise * 0.025f,
+            baseColor[2] * (1.0f + noise * 0.08f) + blueNoise * 0.025f
+        };
+
+        // Snow gradually appears on high, flatter mountain surfaces, with a little noise
+        // to keep the snow line irregular instead of producing a hard horizontal cutoff.
+        const float snowHeight = std::clamp((height - 58.0f) / 14.0f, 0.0f, 1.0f);
+        const float snowSlope = std::clamp(1.0f - std::max(slope - 0.12f, 0.0f) / 0.28f, 0.0f, 1.0f);
+        const float snowCoverage = snowHeight * snowSlope * (0.82f + 0.18f * (noise + 1.0f) * 0.5f);
+        color[0] = color[0] * (1.0f - snowCoverage) + snowCoverage;
+        color[1] = color[1] * (1.0f - snowCoverage) + snowCoverage;
+        color[2] = color[2] * (1.0f - snowCoverage) + snowCoverage;
+
+        for (float& channel : color) channel = std::clamp(channel, 0.0f, 1.0f);
         vertices.push_back({{x, height, z}, {color[0], color[1], color[2]}, {normal.x, normal.y, normal.z}});
     };
     vertices.reserve(vertices.size() + kTerrainResolution * kTerrainResolution * 6);
