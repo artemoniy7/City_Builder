@@ -70,38 +70,92 @@ float4 PSMain(PixelInput input) : SV_TARGET
 }
 
 
+struct WaveResult
+{
+    float3 position;
+    float3 tangentX;
+    float3 tangentZ;
+};
+
+WaveResult ApplyWave(float3 position, float2 direction, float wavelength, float amplitude, float steepness, float speed)
+{
+    const float k = 6.2831853f / wavelength;
+    const float frequency = k * speed;
+    const float phase = dot(direction, position.xz) * k + timeSeconds * frequency;
+    const float s = sin(phase);
+    const float c = cos(phase);
+    const float q = steepness / max(k * amplitude, 0.001f);
+
+    WaveResult result;
+    result.position = position;
+    result.position.xz += direction * (q * amplitude * c);
+    result.position.y += amplitude * s;
+
+    result.tangentX = float3(
+        1.0f - q * direction.x * direction.x * amplitude * k * s,
+        direction.x * amplitude * k * c,
+        -q * direction.x * direction.y * amplitude * k * s);
+
+    result.tangentZ = float3(
+        -q * direction.x * direction.y * amplitude * k * s,
+        direction.y * amplitude * k * c,
+        1.0f - q * direction.y * direction.y * amplitude * k * s);
+    return result;
+}
+
+float3 DisplaceWater(float3 position)
+{
+    const float2 directionA = normalize(float2(0.86f, 0.51f));
+    const float2 directionB = normalize(float2(-0.42f, 0.91f));
+    const float2 directionC = normalize(float2(0.18f, -0.98f));
+
+    WaveResult waveA = ApplyWave(position, directionA, 10.0f, 0.38f, 0.48f, 1.05f);
+    WaveResult waveB = ApplyWave(waveA.position, directionB, 5.2f, 0.17f, 0.35f, 0.78f);
+    WaveResult waveC = ApplyWave(waveB.position, directionC, 2.8f, 0.07f, 0.22f, 1.35f);
+    return waveC.position;
+}
+
 PixelInput WaterVS(VertexInput input)
 {
     PixelInput output;
-    float2 positionXZ = input.position.xz;
-    float waveA = sin(dot(positionXZ, float2(0.085f, 0.052f)) + timeSeconds * 1.35f) * 0.10f;
-    float waveB = sin(dot(positionXZ, float2(-0.041f, 0.097f)) - timeSeconds * 0.95f) * 0.06f;
-    float waveC = sin(dot(positionXZ, float2(0.17f, -0.12f)) + timeSeconds * 1.8f) * 0.025f;
-    float3 world = input.position;
-    world.y += waveA + waveB + waveC;
+    const float3 world = DisplaceWater(input.position);
+
+    // Sample the deformed surface a tiny distance away in both axes to get the
+    // true normal of the animated wave geometry.
+    const float sampleOffset = 0.12f;
+    const float3 offsetX = DisplaceWater(input.position + float3(sampleOffset, 0.0f, 0.0f));
+    const float3 offsetZ = DisplaceWater(input.position + float3(0.0f, 0.0f, sampleOffset));
+    const float3 waveNormal = normalize(cross(offsetZ - world, offsetX - world));
 
     output.position = mul(float4(world, 1.0f), viewProjection);
     output.worldPosition = world;
     output.color = input.color;
-    output.normal = input.normal;
+    output.normal = waveNormal;
     output.shadowPosition = 0.0f;
     return output;
 }
 
 float4 PSWater(PixelInput input) : SV_TARGET
 {
-    float waveLightA = sin(dot(input.worldPosition.xz, float2(0.13f, 0.08f)) + timeSeconds * 1.5f);
-    float waveLightB = sin(dot(input.worldPosition.xz, float2(-0.08f, 0.16f)) - timeSeconds * 1.1f);
-    float ripple = saturate(0.5f + 0.5f * (waveLightA * 0.65f + waveLightB * 0.35f));
+    const float3 normal = normalize(input.normal);
+    const float3 viewDirection = normalize(float3(cameraPosition[0], cameraPosition[1], cameraPosition[2]) - input.worldPosition);
+    const float3 sunDirection = normalize(lightDirection);
 
-    const float3 deepWater = float3(0.035f, 0.30f, 0.38f);
-    const float3 shallowWater = float3(0.08f, 0.50f, 0.56f);
-    const float3 baseColor = lerp(deepWater, shallowWater, ripple * 0.55f);
+    const float fresnel = pow(1.0f - saturate(dot(normal, viewDirection)), 4.0f);
+    const float diffuse = 0.15f + 0.25f * saturate(dot(normal, sunDirection));
+    const float specular = pow(saturate(dot(reflect(-sunDirection, normal), viewDirection)), 72.0f);
 
-    float3 normal = normalize(input.normal);
-    float3 viewDirection = normalize(float3(0.0f, 1.0f, 0.0f));
-    float specular = pow(saturate(dot(normal, viewDirection)), 24.0f);
-    float foam = smoothstep(0.72f, 0.98f, ripple) * 0.12f;
-    float3 color = baseColor + specular * 0.30f + foam;
-    return float4(color, 0.82f);
+    // A small amount of moving surface variation breaks up the perfectly uniform water color.
+    const float rippleA = sin(dot(input.worldPosition.xz, float2(0.45f, 0.23f)) + timeSeconds * 1.7f);
+    const float rippleB = sin(dot(input.worldPosition.xz, float2(-0.31f, 0.52f)) - timeSeconds * 1.2f);
+    const float microRipples = 0.5f + 0.5f * rippleA * rippleB;
+
+    const float3 deepWater = float3(0.015f, 0.12f, 0.16f);
+    const float3 skyReflection = float3(0.28f, 0.55f, 0.68f);
+    const float3 reflectedColor = lerp(skyReflection, float3(0.65f, 0.80f, 0.84f), microRipples * 0.25f);
+    const float3 baseColor = lerp(deepWater, reflectedColor, 0.18f + fresnel * 0.70f);
+    const float3 finalColor = baseColor * diffuse + specular * float3(0.95f, 0.98f, 1.0f);
+
+    // Keep it slightly transparent so the river still reads as a surface over the terrain.
+    return float4(finalColor, 0.90f);
 }
