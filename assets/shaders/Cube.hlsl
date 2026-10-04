@@ -18,8 +18,9 @@ SamplerComparisonState shadowSampler : register(s0);
 struct VertexInput
 {
     float3 position : POSITION;
-    float3 color    : COLOR;
-    float3 normal   : NORMAL;
+    float3 color      : COLOR;
+    float3 normal     : NORMAL;
+    float waterDepth  : WATERDEPTH;
 };
 
 struct PixelInput
