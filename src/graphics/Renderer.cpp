@@ -32,7 +32,7 @@ float TerrainHeight(float x, float z) {
     constexpr float riverBankHalfWidth = 22.0f;
     constexpr float riverOuterHalfWidth = 36.0f;
     constexpr float riverBedHeight = -7.5f;
-    constexpr float riverBankHeight = -4.0f;
+    constexpr float riverBankHeight = -1.0f;
 
     if (riverLateralDistance < riverOuterHalfWidth && z > -230.0f && z < 70.0f) {
         if (riverLateralDistance <= riverBedHalfWidth) {
@@ -402,7 +402,11 @@ void Renderer::CreateAssets() {
         const float height = TerrainHeight(x, z);
         const auto normal = TerrainNormal(x, z);
         const float slope = 1.0f - normal.y;
-        const std::array<float, 3> baseColor = height < -6.0f ? std::array<float, 3>{0.76f, 0.67f, 0.35f}
+        const float riverCenterX = -60.0f + 6.0f * std::sin(z * 0.018f);
+        const bool riverSandBank =
+            std::abs(x - riverCenterX) < 36.0f && z > -230.0f && z < 70.0f;
+        const std::array<float, 3> baseColor =
+            (height < -6.0f || riverSandBank) ? std::array<float, 3>{0.76f, 0.67f, 0.35f}
             : (slope > 0.22f || height > 55.0f) ? std::array<float, 3>{0.42f, 0.43f, 0.40f}
             : (slope > 0.10f) ? std::array<float, 3>{0.38f, 0.24f, 0.13f}
             : std::array<float, 3>{0.20f, 0.55f, 0.22f};
