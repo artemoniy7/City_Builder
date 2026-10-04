@@ -28,7 +28,7 @@ public:
 private:
     static constexpr UINT kFrameCount = 2;
     static constexpr UINT kShadowMapSize = 2048;
-    static constexpr UINT kTerrainResolution = 256;
+    static constexpr UINT kTerrainResolution = 288;
 
     struct Vertex {
         float position[3];
