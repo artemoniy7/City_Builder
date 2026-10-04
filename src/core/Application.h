@@ -22,6 +22,7 @@ private:
     static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     void CreateMainWindow(int commandShow);
     void OnResize(UINT width, UINT height);
+    void OnMouseWheel(short delta);
 
     HINSTANCE instance_{};
     HWND window_{};
