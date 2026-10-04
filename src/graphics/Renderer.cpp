@@ -424,11 +424,13 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     if (GetAsyncKeyState('S') & 0x8000) cameraTarget_ = cameraTarget_ - forward * speed;
     if (GetAsyncKeyState('A') & 0x8000) cameraTarget_ = cameraTarget_ - right * speed;
     if (GetAsyncKeyState('D') & 0x8000) cameraTarget_ = cameraTarget_ + right * speed;
-    if (GetAsyncKeyState('R') & 0x8000) cameraTarget_.y += speed;
-    if (GetAsyncKeyState('F') & 0x8000) cameraTarget_.y -= speed;
-    // T/G now control zoom vertically instead of changing the camera pitch.
-    // This keeps zooming consistent with the mouse wheel: the camera moves
-    // along its orbit and therefore naturally rises/falls with the current pitch.
+    // R/F control camera tilt (pitch). Vertical target movement is intentionally disabled.
+    const float pitchSpeed = 1.5f * deltaSeconds;
+    if (GetAsyncKeyState('R') & 0x8000) cameraPitch_ += pitchSpeed;
+    if (GetAsyncKeyState('F') & 0x8000) cameraPitch_ -= pitchSpeed;
+
+    // T/G control zoom through the orbit radius.
+    // Zooming moves the camera along its orbit and therefore naturally rises/falls with the current pitch.
     constexpr float zoomKeySpeed = 24.0f;
     if (GetAsyncKeyState('T') & 0x8000) cameraOrbitDistance_ -= zoomKeySpeed * deltaSeconds;
     if (GetAsyncKeyState('G') & 0x8000) cameraOrbitDistance_ += zoomKeySpeed * deltaSeconds;
