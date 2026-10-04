@@ -760,10 +760,11 @@ void Renderer::CreateAssets() {
         D3DCOMPILE_ENABLE_STRICTNESS, 0, &shadowVertexShader, &errors));
 
     // ---------- Input layout ----------
-    const std::array<D3D12_INPUT_ELEMENT_DESC, 3> inputLayout{{
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    const std::array<D3D12_INPUT_ELEMENT_DESC, 4> inputLayout{{
+        {"POSITION",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR",      0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL",     0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"WATERDEPTH", 0, DXGI_FORMAT_R32_FLOAT,        0, 36, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     }};
 
     // ---------- Pipeline state ----------
@@ -824,13 +825,16 @@ void Renderer::CreateAssets() {
     auto waterPipelineDescription = pipelineDescription;
     waterPipelineDescription.VS = {waterVertexShader->GetBufferPointer(), waterVertexShader->GetBufferSize()};
     waterPipelineDescription.PS = {waterPixelShader->GetBufferPointer(), waterPixelShader->GetBufferSize()};
-    // Water is rendered as an opaque surface, so blending only adds work and
-    // can make near-coplanar terrain/water edges less stable.
-    waterPipelineDescription.BlendState.RenderTarget[0].BlendEnable = FALSE;
-    waterPipelineDescription.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-    waterPipelineDescription.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-    waterPipelineDescription.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-    waterPipelineDescription.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    // Water is a separate transparent surface. It is drawn after opaque
+    // geometry, tests the existing depth buffer, but never overwrites it.
+    auto& waterBlend = waterPipelineDescription.BlendState.RenderTarget[0];
+    waterBlend.BlendEnable = TRUE;
+    waterBlend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    waterBlend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    waterBlend.BlendOp = D3D12_BLEND_OP_ADD;
+    waterBlend.SrcBlendAlpha = D3D12_BLEND_ONE;
+    waterBlend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    waterBlend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
     waterPipelineDescription.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&waterPipelineDescription, IID_PPV_ARGS(&waterPipelineState_)));
 
@@ -976,10 +980,13 @@ void Renderer::CreateAssets() {
 
     const auto appendWaterVertex = [&waterVertices](float x, float y, float z) {
         constexpr std::array<float, 3> waterColor{0.05f, 0.42f, 0.50f};
+        const float terrainHeight = TerrainHeight(x, z);
+        const float waterDepth = std::max(y - terrainHeight, 0.0f);
         waterVertices.push_back({
             {x, y, z},
             {waterColor[0], waterColor[1], waterColor[2]},
-            {0.0f, 1.0f, 0.0f}
+            {0.0f, 1.0f, 0.0f},
+            waterDepth
         });
     };
 
