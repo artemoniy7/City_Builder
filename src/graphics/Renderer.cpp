@@ -283,20 +283,35 @@ WorldGenerationData GenerateWorld() {
         if (riverIndex >= static_cast<int>(sources.size())) break;
 
         int cell = sources[riverIndex];
-        int count = 0;
-        while (cell >= 0 && count < kRiverPathPoints) {
+        std::vector<int> trace;
+        trace.reserve(cellCount / 2);
+        while (cell >= 0 && static_cast<int>(trace.size()) < cellCount) {
+            trace.push_back(cell);
             const int cx = cell % size;
             const int cz = cell / size;
-            river.path[count] = {worldX(cx), 0.0f, worldZ(cz)};
-            ++count;
-
             if (SeaMask(worldX(cx), worldZ(cz)) > 0.55f) break;
             const int next = flow[cell];
             if (next < 0 || next == cell) break;
             cell = next;
         }
 
-        river.pathCount = std::max(count, 2);
+        const int count = static_cast<int>(trace.size());
+        if (count < 2) continue;
+
+        // Compress the full D8 drainage path to a compact spline-like polyline.
+        // This keeps long rivers long without making TerrainHeight expensive.
+        river.pathCount = std::min(kRiverPathPoints, count);
+        for (int i = 0; i < river.pathCount; ++i) {
+            const float t = static_cast<float>(i) /
+                static_cast<float>(river.pathCount - 1);
+            const int traceIndex = static_cast<int>(
+                std::round(t * static_cast<float>(count - 1)));
+            const int tracedCell = trace[traceIndex];
+            const int cx = tracedCell % size;
+            const int cz = tracedCell / size;
+            river.path[i] = {worldX(cx), 0.0f, worldZ(cz)};
+        }
+
         // Keep the traced order: source -> downstream mouth. This also keeps
         // the water-level profile monotonic in the same direction.
 
