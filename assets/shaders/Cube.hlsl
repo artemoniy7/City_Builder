@@ -73,7 +73,19 @@ float4 PSMain(PixelInput input) : SV_TARGET
     const float  directLight = saturate(dot(normal, normalize(lightDirection)));
     const float  shadow      = CalculateShadow(input.shadowPosition);
     const float  lighting    = 0.16f + 0.84f * directLight * shadow;
-    return float4(input.color * lighting, 1.0f);
+
+    // A very small height band above the water gets a shallow-water tint.
+    // This softens the land/water boundary without painting water over dry land.
+    const float aboveWater = step(input.waterDepth, 0.0f);
+    const float shoreBlend = aboveWater *
+        (1.0f - smoothstep(0.0f, 1.5f, -input.waterDepth));
+    const float3 shallowWaterColor = float3(0.08f, 0.46f, 0.47f);
+    const float3 landColor = lerp(
+        input.color,
+        shallowWaterColor,
+        shoreBlend * 0.35f);
+
+    return float4(landColor * lighting, 1.0f);
 }
 
 
@@ -116,33 +128,41 @@ float3 DisplaceWater(float3 position, float waveScale)
     const float2 directionB = normalize(float2(-0.42f, 0.91f));
     const float2 directionC = normalize(float2(0.18f, -0.98f));
 
-    WaveResult waveA = ApplyWave(position, directionA, 10.0f, 0.48f * waveScale, 0.48f, 1.05f);
-    WaveResult waveB = ApplyWave(waveA.position, directionB, 5.2f, 0.22f * waveScale, 0.35f, 0.78f);
-    WaveResult waveC = ApplyWave(waveB.position, directionC, 2.8f, 0.09f * waveScale, 0.22f, 1.35f);
+    // Keep the geometric motion broad and low-amplitude. The surface should
+    // read as water, not as a noisy tiled texture.
+    WaveResult waveA = ApplyWave(position, directionA, 28.0f, 0.10f * waveScale, 0.28f, 0.35f);
+    WaveResult waveB = ApplyWave(waveA.position, directionB, 18.0f, 0.045f * waveScale, 0.22f, 0.24f);
+    WaveResult waveC = ApplyWave(waveB.position, directionC, 11.0f, 0.018f * waveScale, 0.16f, 0.18f);
     return waveC.position;
 }
 
 PixelInput WaterVS(VertexInput input)
 {
     PixelInput output;
-    const float cameraDistance = distance(
-        float3(cameraPosition[0], cameraPosition[1], cameraPosition[2]),
-        input.position);
+
+    // Water is a state of the terrain vertex. Its surface position is the
+    // local terrain height plus the signed waterDepth baked into that vertex.
+    float3 waterSurface = input.position;
+    waterSurface.y += max(input.waterDepth, 0.0f);
 
     const bool useStaticWater = cameraOrbitDistance >= 5500.0f;
-    const float shoreWaveFade = smoothstep(0.15f, 2.5f, input.waterDepth);
-    const float3 world = useStaticWater
-        ? input.position
-        : DisplaceWater(input.position, shoreWaveFade);
+    const float shoreWaveFade =
+        smoothstep(0.20f, 2.5f, max(input.waterDepth, 0.0f));
 
-    float3 surfaceNormal = input.normal;
-    if (!useStaticWater)
+    const float3 world = input.waterDepth > 0.0f
+        ? (useStaticWater
+            ? waterSurface
+            : DisplaceWater(waterSurface, shoreWaveFade))
+        : input.position;
+
+    float3 surfaceNormal = float3(0.0f, 1.0f, 0.0f);
+    if (input.waterDepth > 0.0f && !useStaticWater)
     {
         const float sampleOffset = 0.12f;
         const float3 offsetX = DisplaceWater(
-            input.position + float3(sampleOffset, 0.0f, 0.0f), shoreWaveFade);
+            waterSurface + float3(sampleOffset, 0.0f, 0.0f), shoreWaveFade);
         const float3 offsetZ = DisplaceWater(
-            input.position + float3(0.0f, 0.0f, sampleOffset), shoreWaveFade);
+            waterSurface + float3(0.0f, 0.0f, sampleOffset), shoreWaveFade);
         surfaceNormal = normalize(cross(offsetZ - world, offsetX - world));
     }
 
@@ -157,17 +177,19 @@ PixelInput WaterVS(VertexInput input)
 
 float4 PSWater(PixelInput input) : SV_TARGET
 {
-    const float cameraDistance = distance(
-        float3(cameraPosition[0], cameraPosition[1], cameraPosition[2]),
-        input.worldPosition);
+    // Dry terrain is handled by PSMain. Only the submerged state of the same
+    // terrain mesh reaches the water material.
+    clip(input.waterDepth);
 
     const float3 skyColor = float3(0.23f, 0.58f, 0.92f);
     const float3 shallowColor = float3(0.08f, 0.46f, 0.47f);
     const float3 deepColor = float3(0.008f, 0.095f, 0.15f);
     const float3 sunColor = float3(1.0f, 0.86f, 0.58f);
 
-    // TerrainHeight is baked into the water mesh as waterDepth. This avoids a
-    // second terrain texture while still giving every water pixel a local depth.
+    // Signed waterDepth is baked into every terrain vertex. Positive values
+    // mean the vertex is submerged; negative values are dry land. This avoids
+    // a second mesh or terrain texture while still giving every water pixel a
+    // local depth.
     // Normalize the terrain-derived depth so the material has a predictable
     // shallow-to-deep transition across both rivers and the sea.
     const float maxDepth = 20.0f;
@@ -179,19 +201,16 @@ float4 PSWater(PixelInput input) : SV_TARGET
 
     if (cameraOrbitDistance < 5500.0f)
     {
-        // Two small, independent normal ripples keep the surface alive even
-        // when the geometric Gerstner displacement is subtle.
-        // Long, smooth travelling ripples. The low frequencies and slow
-        // phase speeds avoid a painted/noisy look while keeping the normal
-        // continuously moving.
+        // Two broad, slow ripples add only a subtle normal variation.
+        // Low frequency and tiny amplitude remove the previous checker/noise look.
         const float rippleA =
-            sin(dot(input.worldPosition.xz, normalize(float2(1.0f, 0.35f))) * 0.05f
+            sin(dot(input.worldPosition.xz, normalize(float2(1.0f, 0.35f))) * 0.01f
                 + timeSeconds * 0.02f);
         const float rippleB =
-            sin(dot(input.worldPosition.xz, normalize(float2(-0.60f, 1.0f))) * 0.08f
+            sin(dot(input.worldPosition.xz, normalize(float2(-0.60f, 1.0f))) * 0.014f
                 - timeSeconds * 0.01f);
         const float waveNormalStrength =
-            0.12f * smoothstep(0.15f, 2.5f, input.waterDepth);
+            0.02f * smoothstep(0.20f, 2.5f, input.waterDepth);
         normal.x += rippleA * waveNormalStrength;
         normal.z += rippleB * waveNormalStrength;
         normal = normalize(normal);
