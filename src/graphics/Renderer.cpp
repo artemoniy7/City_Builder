@@ -211,12 +211,18 @@ void Renderer::CreateAssets() {
     // ---------- Shaders ----------
     ComPtr<ID3DBlob> vertexShader;
     ComPtr<ID3DBlob> pixelShader;
+    ComPtr<ID3DBlob> waterVertexShader;
+    ComPtr<ID3DBlob> waterPixelShader;
     ComPtr<ID3DBlob> shadowVertexShader;
     const auto shaderPath = ShaderPath();
     ThrowIfFailed(D3DCompileFromFile(shaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VSMain", "vs_5_0",
         D3DCOMPILE_ENABLE_STRICTNESS, 0, &vertexShader, &errors));
     ThrowIfFailed(D3DCompileFromFile(shaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PSMain", "ps_5_0",
         D3DCOMPILE_ENABLE_STRICTNESS, 0, &pixelShader, &errors));
+    ThrowIfFailed(D3DCompileFromFile(shaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "WaterVS", "vs_5_0",
+        D3DCOMPILE_ENABLE_STRICTNESS, 0, &waterVertexShader, &errors));
+    ThrowIfFailed(D3DCompileFromFile(shaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PSWater", "ps_5_0",
+        D3DCOMPILE_ENABLE_STRICTNESS, 0, &waterPixelShader, &errors));
     const auto shadowShaderPath = ShadowShaderPath();
     ThrowIfFailed(D3DCompileFromFile(shadowShaderPath.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "ShadowVS", "vs_5_0",
         D3DCOMPILE_ENABLE_STRICTNESS, 0, &shadowVertexShader, &errors));
@@ -282,6 +288,19 @@ void Renderer::CreateAssets() {
     pipelineDescription.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
     ThrowIfFailed(device_->CreateGraphicsPipelineState(&pipelineDescription, IID_PPV_ARGS(&pipelineState_)));
+
+    auto waterPipelineDescription = pipelineDescription;
+    waterPipelineDescription.VS = {waterVertexShader->GetBufferPointer(), waterVertexShader->GetBufferSize()};
+    waterPipelineDescription.PS = {waterPixelShader->GetBufferPointer(), waterPixelShader->GetBufferSize()};
+    waterPipelineDescription.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    waterPipelineDescription.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    waterPipelineDescription.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    waterPipelineDescription.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    waterPipelineDescription.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    waterPipelineDescription.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    waterPipelineDescription.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    waterPipelineDescription.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    ThrowIfFailed(device_->CreateGraphicsPipelineState(&waterPipelineDescription, IID_PPV_ARGS(&waterPipelineState_)));
 
     auto shadowPipelineDescription = pipelineDescription;
     shadowPipelineDescription.VS = {shadowVertexShader->GetBufferPointer(), shadowVertexShader->GetBufferSize()};
@@ -418,6 +437,67 @@ void Renderer::CreateAssets() {
 
     vertexBufferView_ = {vertexBuffer_->GetGPUVirtualAddress(), bufferSize, sizeof(Vertex)};
 
+    // ---------- River geometry ----------
+    // A small ribbon follows the terrain near the eastern foot of the mountain.
+    // It is intentionally low-resolution: the waves are animated in the shader.
+    std::vector<Vertex> waterVertices;
+    constexpr int riverSegments = 48;
+    constexpr float riverStartZ = -260.0f;
+    constexpr float riverEndZ = 100.0f;
+    constexpr float riverWidth = 20.0f;
+    constexpr float waterClearance = 0.65f;
+
+    const auto riverCenter = [](float z) {
+        return 300.0f + 18.0f * std::sin(z * 0.025f);
+    };
+
+    waterVertices.reserve(riverSegments * 6);
+    for (int segment = 0; segment < riverSegments; ++segment) {
+        const float t0 = static_cast<float>(segment) / riverSegments;
+        const float t1 = static_cast<float>(segment + 1) / riverSegments;
+        const float z0 = riverStartZ + (riverEndZ - riverStartZ) * t0;
+        const float z1 = riverStartZ + (riverEndZ - riverStartZ) * t1;
+        const float x0 = riverCenter(z0);
+        const float x1 = riverCenter(z1);
+
+        const math::Vector3 tangent = math::Normalize({x1 - x0, 0.0f, z1 - z0});
+        const math::Vector3 side{-tangent.z, 0.0f, tangent.x};
+        math::Vector3 left0{x0 - side.x * riverWidth * 0.5f, 0.0f, z0 - side.z * riverWidth * 0.5f};
+        math::Vector3 right0{x0 + side.x * riverWidth * 0.5f, 0.0f, z0 + side.z * riverWidth * 0.5f};
+        math::Vector3 left1{x1 - side.x * riverWidth * 0.5f, 0.0f, z1 - side.z * riverWidth * 0.5f};
+        math::Vector3 right1{x1 + side.x * riverWidth * 0.5f, 0.0f, z1 + side.z * riverWidth * 0.5f};
+
+        left0.y = TerrainHeight(left0.x, left0.z) + waterClearance;
+        right0.y = TerrainHeight(right0.x, right0.z) + waterClearance;
+        left1.y = TerrainHeight(left1.x, left1.z) + waterClearance;
+        right1.y = TerrainHeight(right1.x, right1.z) + waterClearance;
+
+        const math::Vector3 normal0 = math::Normalize(
+            TerrainNormal(left0.x, left0.z) + TerrainNormal(right0.x, right0.z));
+        const math::Vector3 normal1 = math::Normalize(
+            TerrainNormal(left1.x, left1.z) + TerrainNormal(right1.x, right1.z));
+        constexpr std::array<float, 3> waterColor{0.05f, 0.42f, 0.50f};
+
+        waterVertices.push_back({{left0.x, left0.y, left0.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal0.x, normal0.y, normal0.z}});
+        waterVertices.push_back({{right0.x, right0.y, right0.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal0.x, normal0.y, normal0.z}});
+        waterVertices.push_back({{right1.x, right1.y, right1.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal1.x, normal1.y, normal1.z}});
+        waterVertices.push_back({{left0.x, left0.y, left0.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal0.x, normal0.y, normal0.z}});
+        waterVertices.push_back({{right1.x, right1.y, right1.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal1.x, normal1.y, normal1.z}});
+        waterVertices.push_back({{left1.x, left1.y, left1.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal1.x, normal1.y, normal1.z}});
+    }
+
+    const UINT waterBufferSize = static_cast<UINT>(waterVertices.size() * sizeof(Vertex));
+    bufferDescription.Width = waterBufferSize;
+    ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&waterVertexBuffer_)));
+
+    void* waterVertexData{};
+    ThrowIfFailed(waterVertexBuffer_->Map(0, nullptr, &waterVertexData));
+    std::memcpy(waterVertexData, waterVertices.data(), waterBufferSize);
+    waterVertexBuffer_->Unmap(0, nullptr);
+    waterVertexBufferView_ = {waterVertexBuffer_->GetGPUVirtualAddress(), waterBufferSize, sizeof(Vertex)};
+    waterVertexCount_ = static_cast<UINT>(waterVertices.size());
+
     // ---------- Constant buffer ----------
     bufferDescription.Width = sizeof(SceneConstants);
     ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
@@ -458,7 +538,7 @@ void Renderer::UpdateCamera(float deltaSeconds) {
     constexpr float zoomKeySpeed = 24.0f;
     if (GetAsyncKeyState('T') & 0x8000) cameraOrbitDistance_ -= zoomKeySpeed * deltaSeconds;
     if (GetAsyncKeyState('G') & 0x8000) cameraOrbitDistance_ += zoomKeySpeed * deltaSeconds;
-    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 160.0f);
+    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 240.0f);
 
     // Keep the view between horizontal and straight down; the camera cannot look above the horizon.
     cameraPitch_ = std::clamp(cameraPitch_, -std::numbers::pi_v<float> * 0.5f, 0.0f);
@@ -488,7 +568,7 @@ void Renderer::OnMouseWheel(short delta) {
     constexpr float zoomStep = 1.15f;
     if (delta > 0) cameraOrbitDistance_ /= zoomStep;
     else if (delta < 0) cameraOrbitDistance_ *= zoomStep;
-    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 160.0f);
+    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 240.0f);
 
     const float horizontalScale = std::cos(cameraPitch_);
     const math::Vector3 offset{
@@ -533,6 +613,7 @@ void Renderer::Render() {
     mappedConstants_->lightDirection[0] = lightDirection.x;
     mappedConstants_->lightDirection[1] = lightDirection.y;
     mappedConstants_->lightDirection[2] = lightDirection.z;
+    mappedConstants_->timeSeconds += deltaSeconds;
 
     ThrowIfFailed(commandAllocator_->Reset());
     ThrowIfFailed(commandList_->Reset(commandAllocator_.Get(), pipelineState_.Get()));
@@ -591,6 +672,12 @@ void Renderer::Render() {
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
     commandList_->DrawInstanced(vertexCount_, 1, 0, 0);
+
+    // Water is rendered after terrain so it blends softly with the ground while
+    // still using the terrain depth buffer to stay visually anchored to the river bed.
+    commandList_->SetPipelineState(waterPipelineState_.Get());
+    commandList_->IASetVertexBuffers(0, 1, &waterVertexBufferView_);
+    commandList_->DrawInstanced(waterVertexCount_, 1, 0, 0);
 
     shadowBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     shadowBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
