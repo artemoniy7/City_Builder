@@ -473,8 +473,9 @@ void Renderer::CreateAssets() {
     vertexBufferView_ = {vertexBuffer_->GetGPUVirtualAddress(), bufferSize, sizeof(Vertex)};
 
     // ---------- River geometry ----------
-    // A compact tessellated ribbon gives the vertex shader enough resolution to
-    // form real wave crests across the river, while remaining very cheap to draw.
+    // Build the river as one continuous shared grid. Every row of vertices is
+    // calculated once and reused by both neighboring segments, so there can
+    // never be a geometric gap between adjacent water tiles.
     std::vector<Vertex> waterVertices;
     constexpr int riverSegments = 56;
     constexpr int riverWidthSegments = 10;
@@ -482,7 +483,6 @@ void Renderer::CreateAssets() {
     constexpr float riverEndZ = 70.0f;
     constexpr float riverWidth = 30.0f;
 
-    // Place the river in the existing low/sandy basin, away from the mountain.
     // Keep the surface above the raised sandy banks and below the wave crest range,
     // so animated troughs never let the terrain break through the water.
     constexpr float riverSurfaceHeight = 0.0f;
@@ -491,62 +491,83 @@ void Renderer::CreateAssets() {
         return -60.0f + 6.0f * std::sin(z * 0.018f);
     };
 
-    const auto appendWaterVertex = [&waterVertices](float x, float z) {
-        const float y = riverSurfaceHeight;
-        const auto normal = TerrainNormal(x, z);
-        constexpr std::array<float, 3> waterColor{0.05f, 0.42f, 0.50f};
-        waterVertices.push_back({{x, y, z}, {waterColor[0], waterColor[1], waterColor[2]},
-            {normal.x, normal.y, normal.z}});
+    const int rowWidth = riverWidthSegments + 1;
+    std::vector<math::Vector3> waterGrid(
+        static_cast<size_t>(riverSegments + 1) * rowWidth);
+
+    const auto gridIndex = [rowWidth](int segment, int widthSegment) {
+        return static_cast<size_t>(segment) * rowWidth + widthSegment;
     };
 
-    waterVertices.reserve(riverSegments * riverWidthSegments * 6);
-    for (int segment = 0; segment < riverSegments; ++segment) {
-        const float t0 = static_cast<float>(segment) / riverSegments;
-        const float t1 = static_cast<float>(segment + 1) / riverSegments;
-        const float z0 = riverStartZ + (riverEndZ - riverStartZ) * t0;
-        const float z1 = riverStartZ + (riverEndZ - riverStartZ) * t1;
-        const float centerX0 = riverCenter(z0);
-        const float centerX1 = riverCenter(z1);
+    for (int segment = 0; segment <= riverSegments; ++segment) {
+        const float t = static_cast<float>(segment) / riverSegments;
+        const float z = riverStartZ + (riverEndZ - riverStartZ) * t;
+        const float centerX = riverCenter(z);
 
-        const math::Vector3 tangent = math::Normalize({centerX1 - centerX0, 0.0f, z1 - z0});
+        float tangentX = 0.0f;
+        float tangentZ = 1.0f;
+        if (segment == 0) {
+            const float nextZ = riverStartZ + (riverEndZ - riverStartZ) / riverSegments;
+            tangentX = riverCenter(nextZ) - centerX;
+            tangentZ = nextZ - z;
+        } else if (segment == riverSegments) {
+            const float previousZ = riverStartZ +
+                (riverEndZ - riverStartZ) * static_cast<float>(segment - 1) / riverSegments;
+            tangentX = centerX - riverCenter(previousZ);
+            tangentZ = z - previousZ;
+        } else {
+            const float previousZ = riverStartZ +
+                (riverEndZ - riverStartZ) * static_cast<float>(segment - 1) / riverSegments;
+            const float nextZ = riverStartZ +
+                (riverEndZ - riverStartZ) * static_cast<float>(segment + 1) / riverSegments;
+            tangentX = riverCenter(nextZ) - riverCenter(previousZ);
+            tangentZ = nextZ - previousZ;
+        }
+
+        const math::Vector3 tangent = math::Normalize({tangentX, 0.0f, tangentZ});
         const math::Vector3 side{-tangent.z, 0.0f, tangent.x};
 
-        for (int widthSegment = 0; widthSegment < riverWidthSegments; ++widthSegment) {
-            const float w0 = static_cast<float>(widthSegment) / riverWidthSegments - 0.5f;
-            const float w1 = static_cast<float>(widthSegment + 1) / riverWidthSegments - 0.5f;
-
-            const float leftX0 = centerX0 + side.x * riverWidth * w0;
-            const float leftZ0 = z0 + side.z * riverWidth * w0;
-            const float rightX0 = centerX0 + side.x * riverWidth * w1;
-            const float rightZ0 = z0 + side.z * riverWidth * w1;
-            const float leftX1 = centerX1 + side.x * riverWidth * w0;
-            const float leftZ1 = z1 + side.z * riverWidth * w0;
-            const float rightX1 = centerX1 + side.x * riverWidth * w1;
-            const float rightZ1 = z1 + side.z * riverWidth * w1;
-
-            // Keep every water vertex on the same continuous surface.
-            // The terrain depth below the surface forms the river basin, while
-            // the depth test naturally hides water where the sandy bank rises.
-            appendWaterVertex(leftX0, leftZ0);
-            appendWaterVertex(rightX0, rightZ0);
-            appendWaterVertex(rightX1, rightZ1);
-            appendWaterVertex(leftX0, leftZ0);
-            appendWaterVertex(rightX1, rightZ1);
-            appendWaterVertex(leftX1, leftZ1);
+        for (int widthSegment = 0; widthSegment <= riverWidthSegments; ++widthSegment) {
+            const float widthT =
+                static_cast<float>(widthSegment) / riverWidthSegments - 0.5f;
+            waterGrid[gridIndex(segment, widthSegment)] = {
+                centerX + side.x * riverWidth * widthT,
+                riverSurfaceHeight,
+                z + side.z * riverWidth * widthT
+            };
         }
     }
 
-    const UINT waterBufferSize = static_cast<UINT>(waterVertices.size() * sizeof(Vertex));
-    bufferDescription.Width = waterBufferSize;
-    ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&waterVertexBuffer_)));
+    waterVertices.reserve(
+        static_cast<size_t>(riverSegments) * riverWidthSegments * 6);
 
-    void* waterVertexData{};
-    ThrowIfFailed(waterVertexBuffer_->Map(0, nullptr, &waterVertexData));
-    std::memcpy(waterVertexData, waterVertices.data(), waterBufferSize);
-    waterVertexBuffer_->Unmap(0, nullptr);
-    waterVertexBufferView_ = {waterVertexBuffer_->GetGPUVirtualAddress(), waterBufferSize, sizeof(Vertex)};
-    waterVertexCount_ = static_cast<UINT>(waterVertices.size());
+    const auto appendWaterVertex = [&waterVertices](const math::Vector3& position) {
+        constexpr std::array<float, 3> waterColor{0.05f, 0.42f, 0.50f};
+        const auto normal = TerrainNormal(position.x, position.z);
+        waterVertices.push_back({
+            {position.x, position.y, position.z},
+            {waterColor[0], waterColor[1], waterColor[2]},
+            {normal.x, normal.y, normal.z}
+        });
+    };
+
+    for (int segment = 0; segment < riverSegments; ++segment) {
+        for (int widthSegment = 0; widthSegment < riverWidthSegments; ++widthSegment) {
+            const math::Vector3& left0 = waterGrid[gridIndex(segment, widthSegment)];
+            const math::Vector3& right0 = waterGrid[gridIndex(segment, widthSegment + 1)];
+            const math::Vector3& left1 = waterGrid[gridIndex(segment + 1, widthSegment)];
+            const math::Vector3& right1 = waterGrid[gridIndex(segment + 1, widthSegment + 1)];
+
+            // Adjacent tiles reuse the exact same grid positions. The two
+            // triangles here therefore meet edge-to-edge with no seam.
+            appendWaterVertex(left0);
+            appendWaterVertex(right0);
+            appendWaterVertex(right1);
+            appendWaterVertex(left0);
+            appendWaterVertex(right1);
+            appendWaterVertex(left1);
+        }
+    }
 
     // ---------- Constant buffer ----------
     bufferDescription.Width = sizeof(SceneConstants);
