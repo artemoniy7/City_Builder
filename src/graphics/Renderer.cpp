@@ -404,23 +404,55 @@ void Renderer::CreateAssets() {
 void Renderer::UpdateCamera(float deltaSeconds) {
     const float speed = 8.0f * deltaSeconds;
     const float turnSpeed = 1.5f * deltaSeconds;
+
+    // Q/E orbit around the point the camera is looking at instead of rotating in place.
     if (GetAsyncKeyState('Q') & 0x8000) cameraYaw_ -= turnSpeed;
     if (GetAsyncKeyState('E') & 0x8000) cameraYaw_ += turnSpeed;
+
     const math::Vector3 forward{std::sin(cameraYaw_), 0.0f, std::cos(cameraYaw_)};
     const math::Vector3 right{forward.z, 0.0f, -forward.x};
-    if (GetAsyncKeyState('W') & 0x8000) cameraPosition_ = cameraPosition_ + forward * speed;
-    if (GetAsyncKeyState('S') & 0x8000) cameraPosition_ = cameraPosition_ - forward * speed;
-    if (GetAsyncKeyState('A') & 0x8000) cameraPosition_ = cameraPosition_ - right * speed;
-    if (GetAsyncKeyState('D') & 0x8000) cameraPosition_ = cameraPosition_ + right * speed;
-    if (GetAsyncKeyState('R') & 0x8000) cameraPosition_.y += speed;
-    if (GetAsyncKeyState('F') & 0x8000) cameraPosition_.y -= speed;
+    if (GetAsyncKeyState('W') & 0x8000) cameraTarget_ = cameraTarget_ + forward * speed;
+    if (GetAsyncKeyState('S') & 0x8000) cameraTarget_ = cameraTarget_ - forward * speed;
+    if (GetAsyncKeyState('A') & 0x8000) cameraTarget_ = cameraTarget_ - right * speed;
+    if (GetAsyncKeyState('D') & 0x8000) cameraTarget_ = cameraTarget_ + right * speed;
+    if (GetAsyncKeyState('R') & 0x8000) cameraTarget_.y += speed;
+    if (GetAsyncKeyState('F') & 0x8000) cameraTarget_.y -= speed;
     if (GetAsyncKeyState('T') & 0x8000) cameraPitch_ += turnSpeed;
     if (GetAsyncKeyState('G') & 0x8000) cameraPitch_ -= turnSpeed;
+
     // Keep the view between horizontal and straight down; the camera cannot look above the horizon.
     cameraPitch_ = std::clamp(cameraPitch_, -std::numbers::pi_v<float> * 0.5f, 0.0f);
+
     const bool spaceDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
-    if (spaceDown && !spaceWasDown_) topDownView_ = !topDownView_;
+    if (spaceDown && !spaceWasDown_) {
+        topDownView_ = !topDownView_;
+        if (topDownView_) cameraPitch_ = -std::numbers::pi_v<float> * 0.5f;
+        else cameraPitch_ = -0.576f;
+    }
     spaceWasDown_ = spaceDown;
+
+    const float horizontalScale = std::cos(cameraPitch_);
+    const math::Vector3 offset{
+        -std::sin(cameraYaw_) * horizontalScale * cameraOrbitDistance_,
+        -std::sin(cameraPitch_) * cameraOrbitDistance_,
+        -std::cos(cameraYaw_) * horizontalScale * cameraOrbitDistance_
+    };
+    cameraPosition_ = cameraTarget_ + offset;
+}
+
+void Renderer::OnMouseWheel(short delta) {
+    constexpr float zoomStep = 1.15f;
+    if (delta > 0) cameraOrbitDistance_ /= zoomStep;
+    else if (delta < 0) cameraOrbitDistance_ *= zoomStep;
+    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 160.0f);
+
+    const float horizontalScale = std::cos(cameraPitch_);
+    const math::Vector3 offset{
+        -std::sin(cameraYaw_) * horizontalScale * cameraOrbitDistance_,
+        -std::sin(cameraPitch_) * cameraOrbitDistance_,
+        -std::cos(cameraYaw_) * horizontalScale * cameraOrbitDistance_
+    };
+    cameraPosition_ = cameraTarget_ + offset;
 }
 
 void Renderer::Render() {
@@ -435,10 +467,7 @@ void Renderer::Render() {
         std::sin(cameraPitch_),
         std::cos(cameraYaw_) * horizontalLookScale,
     };
-    // The initial pitch keeps the platform and cube in frame; T/G adjust it afterwards.
-    const math::Vector3 target = topDownView_
-        ? cameraPosition_ + math::Vector3{0.0f, -1.0f, 0.0f}
-        : cameraPosition_ + lookDirection;
+    const math::Vector3 target = cameraTarget_;
     // A downward-facing camera needs a horizontal up vector. Deriving it from yaw keeps Q/E rotating the view.
     const bool useYawBasedUp = topDownView_ || std::abs(lookDirection.y) > 0.99f;
     const math::Vector3 yawBasedUp{-std::cos(cameraYaw_), 0.0f, std::sin(cameraYaw_)};
