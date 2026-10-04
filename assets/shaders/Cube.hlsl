@@ -74,18 +74,9 @@ float4 PSMain(PixelInput input) : SV_TARGET
     const float  shadow      = CalculateShadow(input.shadowPosition);
     const float  lighting    = 0.16f + 0.84f * directLight * shadow;
 
-    // A very small height band above the water gets a shallow-water tint.
-    // This softens the land/water boundary without painting water over dry land.
-    const float aboveWater = step(input.waterDepth, 0.0f);
-    const float shoreBlend = aboveWater *
-        (1.0f - smoothstep(0.0f, 1.5f, -input.waterDepth));
-    const float3 shallowWaterColor = float3(0.08f, 0.46f, 0.47f);
-    const float3 landColor = lerp(
-        input.color,
-        shallowWaterColor,
-        shoreBlend * 0.35f);
-
-    return float4(landColor * lighting, 1.0f);
+    // Land owns the terrain grid. Water is no longer painted through those
+    // triangles, so the land pass remains a clean opaque height-field surface.
+    return float4(input.color * lighting, 1.0f);
 }
 
 
@@ -140,23 +131,20 @@ PixelInput WaterVS(VertexInput input)
 {
     PixelInput output;
 
-    // Water is a state of the terrain vertex. Its surface position is the
-    // local terrain height plus the signed waterDepth baked into that vertex.
-    float3 waterSurface = input.position;
-    waterSurface.y += max(input.waterDepth, 0.0f);
-
+    // Water vertices already lie on their continuous spline/shore surface.
+    // waterDepth is only the material input used to soften waves and color the
+    // shallow edge; it must not be added to position a second time.
+    const float3 waterSurface = input.position;
     const bool useStaticWater = cameraOrbitDistance >= 5500.0f;
     const float shoreWaveFade =
-        smoothstep(0.20f, 2.5f, max(input.waterDepth, 0.0f));
+        smoothstep(0.20f, 2.5f, input.waterDepth);
 
-    const float3 world = input.waterDepth > 0.0f
-        ? (useStaticWater
-            ? waterSurface
-            : DisplaceWater(waterSurface, shoreWaveFade))
-        : input.position;
+    const float3 world = useStaticWater
+        ? waterSurface
+        : DisplaceWater(waterSurface, shoreWaveFade);
 
     float3 surfaceNormal = float3(0.0f, 1.0f, 0.0f);
-    if (input.waterDepth > 0.0f && !useStaticWater)
+    if (!useStaticWater)
     {
         const float sampleOffset = 0.12f;
         const float3 offsetX = DisplaceWater(
