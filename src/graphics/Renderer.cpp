@@ -569,6 +569,18 @@ void Renderer::CreateAssets() {
         }
     }
 
+    const UINT waterBufferSize = static_cast<UINT>(waterVertices.size() * sizeof(Vertex));
+    bufferDescription.Width = waterBufferSize;
+    ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&waterVertexBuffer_)));
+
+    void* waterVertexData{};
+    ThrowIfFailed(waterVertexBuffer_->Map(0, nullptr, &waterVertexData));
+    std::memcpy(waterVertexData, waterVertices.data(), waterBufferSize);
+    waterVertexBuffer_->Unmap(0, nullptr);
+    waterVertexBufferView_ = {waterVertexBuffer_->GetGPUVirtualAddress(), waterBufferSize, sizeof(Vertex)};
+    waterVertexCount_ = static_cast<UINT>(waterVertices.size());
+
     // ---------- Constant buffer ----------
     bufferDescription.Width = sizeof(SceneConstants);
     ThrowIfFailed(device_->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufferDescription,
