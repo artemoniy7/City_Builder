@@ -442,19 +442,21 @@ void Renderer::CreateAssets() {
     // form real wave crests across the river, while remaining very cheap to draw.
     std::vector<Vertex> waterVertices;
     constexpr int riverSegments = 56;
-    constexpr int riverWidthSegments = 8;
+    constexpr int riverWidthSegments = 10;
     constexpr float riverStartZ = -230.0f;
-    constexpr float riverEndZ = 90.0f;
-    constexpr float riverWidth = 24.0f;
-    constexpr float waterClearance = 0.90f;
-    constexpr float riverBankOverlap = 2.0f;
+    constexpr float riverEndZ = 70.0f;
+    constexpr float riverWidth = 30.0f;
+
+    // Place the river in the existing low/sandy basin, away from the mountain.
+    // The fixed surface level gives the river visible depth above the sandy bed.
+    constexpr float riverSurfaceHeight = -2.5f;
 
     const auto riverCenter = [](float z) {
-        return 330.0f + 12.0f * std::sin(z * 0.022f);
+        return -60.0f + 6.0f * std::sin(z * 0.018f);
     };
 
     const auto appendWaterVertex = [&waterVertices](float x, float z) {
-        const float y = TerrainHeight(x, z) + waterClearance;
+        const float y = riverSurfaceHeight;
         const auto normal = TerrainNormal(x, z);
         constexpr std::array<float, 3> waterColor{0.05f, 0.42f, 0.50f};
         waterVertices.push_back({{x, y, z}, {waterColor[0], waterColor[1], waterColor[2]},
@@ -486,27 +488,15 @@ void Renderer::CreateAssets() {
             const float rightX1 = centerX1 + side.x * riverWidth * w1;
             const float rightZ1 = z1 + side.z * riverWidth * w1;
 
-            // Extend the outer river rows slightly under the terrain so
-            // sloped banks do not expose thin gaps beside the animated waves.
-            const bool isOuterEdge = widthSegment == 0 || widthSegment == riverWidthSegments - 1;
-            const float overlap = isOuterEdge ? riverBankOverlap : 0.0f;
-            const float edgeSign = widthSegment == 0 ? -1.0f : 1.0f;
-
-            const float bankLeftX0 = leftX0 + side.x * edgeSign * overlap;
-            const float bankLeftZ0 = leftZ0 + side.z * edgeSign * overlap;
-            const float bankRightX0 = rightX0 + side.x * edgeSign * overlap;
-            const float bankRightZ0 = rightZ0 + side.z * edgeSign * overlap;
-            const float bankLeftX1 = leftX1 + side.x * edgeSign * overlap;
-            const float bankLeftZ1 = leftZ1 + side.z * edgeSign * overlap;
-            const float bankRightX1 = rightX1 + side.x * edgeSign * overlap;
-            const float bankRightZ1 = rightZ1 + side.z * edgeSign * overlap;
-
-            appendWaterVertex(bankLeftX0, bankLeftZ0);
-            appendWaterVertex(bankRightX0, bankRightZ0);
-            appendWaterVertex(bankRightX1, bankRightZ1);
-            appendWaterVertex(bankLeftX0, bankLeftZ0);
-            appendWaterVertex(bankRightX1, bankRightZ1);
-            appendWaterVertex(bankLeftX1, bankLeftZ1);
+            // Keep every water vertex on the same continuous surface.
+            // The terrain depth below the surface forms the river basin, while
+            // the depth test naturally hides water where the sandy bank rises.
+            appendWaterVertex(leftX0, leftZ0);
+            appendWaterVertex(rightX0, rightZ0);
+            appendWaterVertex(rightX1, rightZ1);
+            appendWaterVertex(leftX0, leftZ0);
+            appendWaterVertex(rightX1, rightZ1);
+            appendWaterVertex(leftX1, leftZ1);
         }
     }
 
