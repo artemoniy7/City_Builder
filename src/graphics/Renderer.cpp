@@ -483,8 +483,9 @@ void Renderer::CreateAssets() {
     constexpr float riverWidth = 30.0f;
 
     // Place the river in the existing low/sandy basin, away from the mountain.
-    // The fixed surface level gives the river visible depth above the sandy bed.
-    constexpr float riverSurfaceHeight = -2.5f;
+    // Keep the surface above the raised sandy banks and below the wave crest range,
+    // so animated troughs never let the terrain break through the water.
+    constexpr float riverSurfaceHeight = 0.0f;
 
     const auto riverCenter = [](float z) {
         return -60.0f + 6.0f * std::sin(z * 0.018f);
