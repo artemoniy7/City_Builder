@@ -131,13 +131,6 @@ float SegmentDistance(float x, float z, float ax, float az, float bx, float bz) 
     return std::sqrt(ex * ex + ez * ez);
 }
 
-float TerraceCurve(float value, float softness) {
-    const float lower = std::floor(value);
-    const float local = value - lower;
-    const float rounded = SmoothStep(0.0f, 1.0f, local);
-    return lower + local * (1.0f - softness) + rounded * softness;
-}
-
 float BaseTerrainHeight(float x, float z, std::uint64_t seed) {
     // The terrain is deliberately built from several geographic scales:
     // continental shape -> regional relief -> mountain belts -> valleys ->
@@ -196,23 +189,28 @@ float BaseTerrainHeight(float x, float z, std::uint64_t seed) {
     // A broad, curved mountain belt. Instead of a single circular mountain
     // blob, several overlapping ridge spines create a realistic chain with
     // passes and valleys between them.
+    const float mountainOffsetX =
+        1700.0f * FbmNoise(0.11f, 0.37f, seed + 271);
+    const float mountainOffsetZ =
+        1500.0f * FbmNoise(0.29f, 0.17f, seed + 281);
+
     const float beltCenter =
         SegmentDistance(
             wx, wz,
-            1800.0f, -7600.0f,
-            4300.0f, -1500.0f);
+            1800.0f + mountainOffsetX, -7600.0f + mountainOffsetZ,
+            4300.0f + mountainOffsetX, -1500.0f + mountainOffsetZ);
 
     const float beltCenter2 =
         SegmentDistance(
             wx, wz,
-            4300.0f, -1500.0f,
-            6500.0f, 5200.0f);
+            4300.0f + mountainOffsetX, -1500.0f + mountainOffsetZ,
+            6500.0f + mountainOffsetX, 5200.0f + mountainOffsetZ);
 
     const float beltCenter3 =
         SegmentDistance(
             wx, wz,
-            6500.0f, 5200.0f,
-            9200.0f, 9300.0f);
+            6500.0f + mountainOffsetX, 5200.0f + mountainOffsetZ,
+            9200.0f + mountainOffsetX, 9300.0f + mountainOffsetZ);
 
     const float beltDistance =
         std::min({beltCenter, beltCenter2, beltCenter3});
@@ -248,8 +246,10 @@ float BaseTerrainHeight(float x, float z, std::uint64_t seed) {
 
     // A smaller secondary upland region adds geographic variety without
     // creating another mountain wall.
-    const float uplandX = 9800.0f;
-    const float uplandZ = -2200.0f;
+    const float uplandX =
+        9800.0f + 2200.0f * FbmNoise(0.17f, 0.41f, seed + 601);
+    const float uplandZ =
+        -2200.0f + 1800.0f * FbmNoise(0.43f, 0.23f, seed + 611);
     const float uplandDistance = std::sqrt(
         std::pow((wx - uplandX) / 4200.0f, 2.0f) +
         std::pow((wz - uplandZ) / 3300.0f, 2.0f));
