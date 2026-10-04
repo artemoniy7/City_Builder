@@ -30,6 +30,7 @@ constexpr int kRiverCurveSamples = 48;
 
 struct RiverDefinition {
     std::array<city::math::Vector3, kRiverPathPoints> path{};
+    std::array<city::math::Vector3, kRiverCurveSamples + 1> curveSamples{};
     std::array<float, kRiverPathPoints> waterLevels{};
     std::array<float, kRiverPathPoints> widths{};
     int pathCount{};
@@ -330,6 +331,10 @@ struct HydroCell {
     bool operator>(const HydroCell& other) const { return elevation > other.elevation; }
 };
 
+city::math::Vector3 RiverCurvePoint(
+    const RiverDefinition& river,
+    float pathT);
+
 WorldGenerationData GenerateWorld() {
     std::random_device rd;
     const std::uint64_t seed =
@@ -437,29 +442,58 @@ WorldGenerationData GenerateWorld() {
         return scoreA > scoreB;
     });
 
+    // Cache whether a D8 cell eventually drains into the sea. The previous
+    // implementation traced every candidate independently, so thousands of
+    // candidates could repeatedly walk the same long downstream paths.
+    // Here each cell's drainage result is resolved at most once.
+    std::vector<unsigned char> reachesSeaState(cellCount, 0);
+    std::vector<int> drainagePath;
+    drainagePath.reserve(cellCount / 4);
+
+    const auto drainsToSea = [&](int start) {
+        drainagePath.clear();
+        int probe = start;
+
+        while (probe >= 0 && reachesSeaState[probe] == 0) {
+            const int px = probe % size;
+            const int pz = probe / size;
+            if (SeaMask(worldX(px), worldZ(pz)) > kSeaWaterThreshold) {
+                reachesSeaState[probe] = 3;
+                break;
+            }
+
+            reachesSeaState[probe] = 1;
+            drainagePath.push_back(probe);
+
+            const int next = flow[probe];
+            if (next < 0 || next == probe) {
+                reachesSeaState[probe] = 2;
+                break;
+            }
+            probe = next;
+        }
+
+        const bool reachesSea =
+            probe >= 0 && reachesSeaState[probe] == 3;
+        const unsigned char resolvedState = reachesSea ? 3 : 2;
+        for (auto it = drainagePath.rbegin(); it != drainagePath.rend(); ++it) {
+            if (reachesSeaState[*it] == 1)
+                reachesSeaState[*it] = resolvedState;
+        }
+        return reachesSea;
+    };
+
     std::vector<int> sources;
     for (const int source : candidates) {
         const int sx = source % size;
         const int sz = source / size;
         const float x = worldX(sx);
         const float z = worldZ(sz);
-        if (raw[source] < 150.0f || SeaMask(x, z) > 0.05f || accumulation[source] < 12) continue;
+        if (raw[source] < 150.0f || SeaMask(x, z) > 0.05f || accumulation[source] < 12)
+            continue;
 
-        // Only accept headwaters whose actual D8 route reaches the generated sea.
-        int probe = source;
-        bool reachesSea = false;
-        for (int step = 0; step < cellCount; ++step) {
-            const int px = probe % size;
-            const int pz = probe / size;
-            if (SeaMask(worldX(px), worldZ(pz)) > kSeaWaterThreshold) {
-                reachesSea = true;
-                break;
-            }
-            const int next = flow[probe];
-            if (next < 0 || next == probe) break;
-            probe = next;
-        }
-        if (!reachesSea) continue;
+        if (!drainsToSea(source))
+            continue;
 
         bool separated = true;
         for (const int selected : sources) {
@@ -542,6 +576,18 @@ WorldGenerationData GenerateWorld() {
         // The final river station is exactly the sea surface, so the mouth
         // cannot end on a visible vertical step or a strip of dry land.
         river.waterLevels[river.pathCount - 1] = kSeaLevel + 0.8f;
+    }
+
+    // Bake the visible river splines once. Terrain sampling can then use
+    // cheap segment-distance tests instead of reconstructing Catmull-Rom points
+    // for every terrain query.
+    for (auto& river : world.rivers) {
+        if (river.pathCount < 2) continue;
+        for (int sample = 0; sample <= kRiverCurveSamples; ++sample) {
+            const float t = static_cast<float>(sample) /
+                static_cast<float>(kRiverCurveSamples);
+            river.curveSamples[sample] = RiverCurvePoint(river, t);
+        }
     }
 
     return world;
@@ -639,12 +685,8 @@ float DistanceToRiverCurve(
     pathT = 0.0f;
 
     for (int sample = 0; sample < kRiverCurveSamples; ++sample) {
-        const float t0 = static_cast<float>(sample) /
-            static_cast<float>(kRiverCurveSamples);
-        const float t1 = static_cast<float>(sample + 1) /
-            static_cast<float>(kRiverCurveSamples);
-        const auto a = RiverCurvePoint(river, t0);
-        const auto b = RiverCurvePoint(river, t1);
+        const auto& a = river.curveSamples[sample];
+        const auto& b = river.curveSamples[sample + 1];
 
         float segmentT = 0.0f;
         const float distance = DistanceToSegment2D(x, z, a, b, segmentT);
@@ -1110,12 +1152,62 @@ void Renderer::CreateAssets() {
 
     constexpr float terrainSize = kWorldSize;
     const float cellSize = terrainSize / kTerrainResolution;
-    const auto appendTerrainVertex = [&vertices](float x, float z) {
-        const float height = TerrainHeight(x, z);
-        // Water is rendered by continuous spline/shore meshes now. Keep the
-        // terrain pass purely land so the water cannot inherit terrain-grid seams.
+    const UINT terrainGridSize = kTerrainResolution + 1;
+
+    // Build each terrain sample exactly once. The old generator emitted six
+    // independent vertices per cell and recalculated TerrainHeight/TerrainNormal
+    // for every copy. That made river-distance/spline evaluation dominate startup.
+    std::vector<float> terrainHeights(
+        static_cast<size_t>(terrainGridSize) * terrainGridSize);
+
+    const auto terrainGridIndex = [terrainGridSize](UINT x, UINT z) {
+        return static_cast<size_t>(z) * terrainGridSize + x;
+    };
+    const auto terrainGridX = [terrainSize, cellSize](UINT x) {
+        return -terrainSize * 0.5f + static_cast<float>(x) * cellSize;
+    };
+    const auto terrainGridZ = [terrainSize, cellSize](UINT z) {
+        return -terrainSize * 0.5f + static_cast<float>(z) * cellSize;
+    };
+
+    for (UINT z = 0; z < terrainGridSize; ++z) {
+        for (UINT x = 0; x < terrainGridSize; ++x) {
+            terrainHeights[terrainGridIndex(x, z)] =
+                TerrainHeight(terrainGridX(x), terrainGridZ(z));
+        }
+    }
+
+    const auto cachedNormal = [&](UINT x, UINT z) {
+        const UINT left = x > 0 ? x - 1 : x;
+        const UINT right = x < kTerrainResolution ? x + 1 : x;
+        const UINT down = z > 0 ? z - 1 : z;
+        const UINT up = z < kTerrainResolution ? z + 1 : z;
+
+        const float dx = terrainHeights[terrainGridIndex(right, z)] -
+            terrainHeights[terrainGridIndex(left, z)];
+        const float dz = terrainHeights[terrainGridIndex(x, up)] -
+            terrainHeights[terrainGridIndex(x, down)];
+
+        const float xSpacing =
+            static_cast<float>(right - left) * cellSize;
+        const float zSpacing =
+            static_cast<float>(up - down) * cellSize;
+
+        return city::math::Normalize({
+            -dx,
+            std::max(xSpacing + zSpacing, 0.001f),
+            -dz
+        });
+    };
+
+    const auto appendTerrainVertex = [&vertices, &terrainHeights, &terrainGridIndex,
+                                      &cachedNormal, terrainGridX, terrainGridZ]
+        (UINT x, UINT z) {
+        const float worldX = terrainGridX(x);
+        const float worldZ = terrainGridZ(z);
+        const float height = terrainHeights[terrainGridIndex(x, z)];
         constexpr float waterDepth = -1.0f;
-        const auto normal = TerrainNormal(x, z);
+        const auto normal = cachedNormal(x, z);
         const float slope = 1.0f - normal.y;
         const bool riverSandBank = height < 4.0f && height > -18.0f;
         const std::array<float, 3> baseColor =
@@ -1124,46 +1216,54 @@ void Renderer::CreateAssets() {
             : (slope > 0.12f) ? std::array<float, 3>{0.38f, 0.30f, 0.18f}
             : std::array<float, 3>{0.20f, 0.55f, 0.22f};
 
-        // Add subtle, deterministic RGB variation so large terrain areas are not perfectly flat.
-        const float noise = TerrainNoise(x * 0.004f, z * 0.004f);
-        const float redNoise = TerrainNoise(x * 0.007f + 17.0f, z * 0.007f - 31.0f);
-        const float greenNoise = TerrainNoise(x * 0.007f - 43.0f, z * 0.007f + 7.0f);
-        const float blueNoise = TerrainNoise(x * 0.007f + 61.0f, z * 0.007f + 29.0f);
+        const float noise = TerrainNoise(worldX * 0.004f, worldZ * 0.004f);
+        const float redNoise = TerrainNoise(worldX * 0.007f + 17.0f, worldZ * 0.007f - 31.0f);
+        const float greenNoise = TerrainNoise(worldX * 0.007f - 43.0f, worldZ * 0.007f + 7.0f);
+        const float blueNoise = TerrainNoise(worldX * 0.007f + 61.0f, worldZ * 0.007f + 29.0f);
         std::array<float, 3> color{
             baseColor[0] * (1.0f + noise * 0.08f) + redNoise * 0.025f,
             baseColor[1] * (1.0f + noise * 0.08f) + greenNoise * 0.025f,
             baseColor[2] * (1.0f + noise * 0.08f) + blueNoise * 0.025f
         };
 
-        // Snow gradually appears on high, flatter mountain surfaces, with a little noise
-        // to keep the snow line irregular instead of producing a hard horizontal cutoff.
         const float snowHeight = std::clamp((height - 650.0f) / 240.0f, 0.0f, 1.0f);
-        const float snowSlope = std::clamp(1.0f - std::max(slope - 0.10f, 0.0f) / 0.34f, 0.0f, 1.0f);
-        const float snowCoverage = snowHeight * snowSlope * (0.82f + 0.18f * (noise + 1.0f) * 0.5f);
+        const float snowSlope = std::clamp(
+            1.0f - std::max(slope - 0.10f, 0.0f) / 0.34f,
+            0.0f,
+            1.0f);
+        const float snowCoverage =
+            snowHeight * snowSlope * (0.82f + 0.18f * (noise + 1.0f) * 0.5f);
         color[0] = color[0] * (1.0f - snowCoverage) + snowCoverage;
         color[1] = color[1] * (1.0f - snowCoverage) + snowCoverage;
         color[2] = color[2] * (1.0f - snowCoverage) + snowCoverage;
 
-        for (float& channel : color) channel = std::clamp(channel, 0.0f, 1.0f);
+        for (float& channel : color)
+            channel = std::clamp(channel, 0.0f, 1.0f);
+
         vertices.push_back({
-            {x, height, z},
+            {worldX, height, worldZ},
             {color[0], color[1], color[2]},
             {normal.x, normal.y, normal.z},
             waterDepth
         });
     };
-    vertices.reserve(vertices.size() + kTerrainResolution * kTerrainResolution * 6);
+
+    vertices.reserve(vertices.size() +
+        static_cast<size_t>(kTerrainResolution) *
+        static_cast<size_t>(kTerrainResolution) * 6);
+
+    // Keep the original non-indexed terrain topology for rendering, but every
+    // emitted vertex now comes from the cached height/normal sample above.
     for (UINT z = 0; z < kTerrainResolution; ++z) {
         for (UINT x = 0; x < kTerrainResolution; ++x) {
-            const float x0 = -terrainSize * 0.5f + x * cellSize;
-            const float z0 = -terrainSize * 0.5f + z * cellSize;
-            const float x1 = x0 + cellSize;
-            const float z1 = z0 + cellSize;
-            appendTerrainVertex(x0, z0); appendTerrainVertex(x0, z1); appendTerrainVertex(x1, z1);
-            appendTerrainVertex(x0, z0); appendTerrainVertex(x1, z1); appendTerrainVertex(x1, z0);
+            appendTerrainVertex(x, z);
+            appendTerrainVertex(x, z + 1);
+            appendTerrainVertex(x + 1, z + 1);
+            appendTerrainVertex(x, z);
+            appendTerrainVertex(x + 1, z + 1);
+            appendTerrainVertex(x + 1, z);
         }
     }
-    vertexCount_ = static_cast<UINT>(vertices.size());
 
     const UINT bufferSize = static_cast<UINT>(vertices.size() * sizeof(Vertex));
     D3D12_HEAP_PROPERTIES uploadHeap{};
