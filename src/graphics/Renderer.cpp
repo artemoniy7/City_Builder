@@ -845,7 +845,7 @@ void Renderer::OnMouseWheel(short delta) {
     constexpr float zoomStep = 1.15f;
     if (delta > 0) cameraOrbitDistance_ /= zoomStep;
     else if (delta < 0) cameraOrbitDistance_ *= zoomStep;
-    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 240.0f);
+    cameraOrbitDistance_ = std::clamp(cameraOrbitDistance_, 4.0f, 15000.0f);
 
     const float horizontalScale = std::cos(cameraPitch_);
     const math::Vector3 offset{
