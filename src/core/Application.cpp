@@ -60,6 +60,10 @@ void Application::OnResize(UINT width, UINT height) {
     }
 }
 
+void Application::OnMouseWheel(short delta) {
+    if (renderer_) renderer_->OnMouseWheel(delta);
+}
+
 LRESULT CALLBACK Application::WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     auto* application = reinterpret_cast<Application*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
@@ -75,6 +79,11 @@ LRESULT CALLBACK Application::WindowProc(HWND window, UINT message, WPARAM wPara
             return 0;
         }
         break;
+    case WM_MOUSEWHEEL:
+        if (application) {
+            application->OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wParam));
+        }
+        return 0;
     case WM_SIZE:
         if (application) {
             application->OnResize(LOWORD(lParam), HIWORD(lParam));
