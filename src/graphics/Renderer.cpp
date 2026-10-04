@@ -431,6 +431,30 @@ float TerrainNoise(float x, float z) {
     return FbmNoise(x, z, GetWorldGeneration().seed);
 }
 
+city::math::Vector3 ResolveCameraTerrainCollision(
+    const city::math::Vector3& target,
+    const city::math::Vector3& desiredPosition) {
+    constexpr float clearance = 2.0f;
+    constexpr int samples = 64;
+
+    const city::math::Vector3 direction = desiredPosition - target;
+
+    // Follow the highest terrain surface along the camera orbit path.
+    // This keeps the camera above mountain slopes instead of simply stopping
+    // when the desired orbit point intersects the terrain.
+    float highestSurface = TerrainHeight(target.x, target.z);
+    for (int i = 1; i <= samples; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(samples);
+        const float x = target.x + direction.x * t;
+        const float z = target.z + direction.z * t;
+        highestSurface = std::max(highestSurface, TerrainHeight(x, z));
+    }
+
+    city::math::Vector3 corrected = desiredPosition;
+    corrected.y = std::max(corrected.y, highestSurface + clearance);
+    return corrected;
+}
+
 std::filesystem::path ShaderPath() {
     std::array<wchar_t, MAX_PATH> executablePath{};
     GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size()));
