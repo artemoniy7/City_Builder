@@ -1290,6 +1290,7 @@ void Renderer::CreateAssets() {
     vertexBuffer_->Unmap(0, nullptr);
 
     vertexBufferView_ = {vertexBuffer_->GetGPUVirtualAddress(), bufferSize, sizeof(Vertex)};
+    vertexCount_ = static_cast<UINT>(vertices.size());
 
     // ---------- Continuous water bodies ----------
     // Rivers are swept as one shared ribbon per river. There are no terrain
