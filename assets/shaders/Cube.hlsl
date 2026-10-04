@@ -5,7 +5,9 @@ cbuffer SceneConstants : register(b0)
     float3 lightDirection;
     float padding;
     float timeSeconds;
-    float3 waterPadding;
+    float waterPadding;
+    float3 cameraPosition;
+    float cameraPadding;
 };
 
 Texture2D shadowMap : register(t0);
