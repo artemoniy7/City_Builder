@@ -438,10 +438,11 @@ void Renderer::CreateAssets() {
     vertexBufferView_ = {vertexBuffer_->GetGPUVirtualAddress(), bufferSize, sizeof(Vertex)};
 
     // ---------- River geometry ----------
-    // A small ribbon follows the terrain near the eastern foot of the mountain.
-    // It is intentionally low-resolution: the waves are animated in the shader.
+    // A compact tessellated ribbon gives the vertex shader enough resolution to
+    // form real wave crests across the river, while remaining very cheap to draw.
     std::vector<Vertex> waterVertices;
-    constexpr int riverSegments = 48;
+    constexpr int riverSegments = 56;
+    constexpr int riverWidthSegments = 8;
     constexpr float riverStartZ = -260.0f;
     constexpr float riverEndZ = 100.0f;
     constexpr float riverWidth = 20.0f;
@@ -451,39 +452,46 @@ void Renderer::CreateAssets() {
         return 300.0f + 18.0f * std::sin(z * 0.025f);
     };
 
-    waterVertices.reserve(riverSegments * 6);
+    const auto appendWaterVertex = [&waterVertices](float x, float z) {
+        const float y = TerrainHeight(x, z) + waterClearance;
+        const auto normal = TerrainNormal(x, z);
+        constexpr std::array<float, 3> waterColor{0.05f, 0.42f, 0.50f};
+        waterVertices.push_back({{x, y, z}, {waterColor[0], waterColor[1], waterColor[2]},
+            {normal.x, normal.y, normal.z}});
+    };
+
+    waterVertices.reserve(riverSegments * riverWidthSegments * 6);
     for (int segment = 0; segment < riverSegments; ++segment) {
         const float t0 = static_cast<float>(segment) / riverSegments;
         const float t1 = static_cast<float>(segment + 1) / riverSegments;
         const float z0 = riverStartZ + (riverEndZ - riverStartZ) * t0;
         const float z1 = riverStartZ + (riverEndZ - riverStartZ) * t1;
-        const float x0 = riverCenter(z0);
-        const float x1 = riverCenter(z1);
+        const float centerX0 = riverCenter(z0);
+        const float centerX1 = riverCenter(z1);
 
-        const math::Vector3 tangent = math::Normalize({x1 - x0, 0.0f, z1 - z0});
+        const math::Vector3 tangent = math::Normalize({centerX1 - centerX0, 0.0f, z1 - z0});
         const math::Vector3 side{-tangent.z, 0.0f, tangent.x};
-        math::Vector3 left0{x0 - side.x * riverWidth * 0.5f, 0.0f, z0 - side.z * riverWidth * 0.5f};
-        math::Vector3 right0{x0 + side.x * riverWidth * 0.5f, 0.0f, z0 + side.z * riverWidth * 0.5f};
-        math::Vector3 left1{x1 - side.x * riverWidth * 0.5f, 0.0f, z1 - side.z * riverWidth * 0.5f};
-        math::Vector3 right1{x1 + side.x * riverWidth * 0.5f, 0.0f, z1 + side.z * riverWidth * 0.5f};
 
-        left0.y = TerrainHeight(left0.x, left0.z) + waterClearance;
-        right0.y = TerrainHeight(right0.x, right0.z) + waterClearance;
-        left1.y = TerrainHeight(left1.x, left1.z) + waterClearance;
-        right1.y = TerrainHeight(right1.x, right1.z) + waterClearance;
+        for (int widthSegment = 0; widthSegment < riverWidthSegments; ++widthSegment) {
+            const float w0 = static_cast<float>(widthSegment) / riverWidthSegments - 0.5f;
+            const float w1 = static_cast<float>(widthSegment + 1) / riverWidthSegments - 0.5f;
 
-        const math::Vector3 normal0 = math::Normalize(
-            TerrainNormal(left0.x, left0.z) + TerrainNormal(right0.x, right0.z));
-        const math::Vector3 normal1 = math::Normalize(
-            TerrainNormal(left1.x, left1.z) + TerrainNormal(right1.x, right1.z));
-        constexpr std::array<float, 3> waterColor{0.05f, 0.42f, 0.50f};
+            const float leftX0 = centerX0 + side.x * riverWidth * w0;
+            const float leftZ0 = z0 + side.z * riverWidth * w0;
+            const float rightX0 = centerX0 + side.x * riverWidth * w1;
+            const float rightZ0 = z0 + side.z * riverWidth * w1;
+            const float leftX1 = centerX1 + side.x * riverWidth * w0;
+            const float leftZ1 = z1 + side.z * riverWidth * w0;
+            const float rightX1 = centerX1 + side.x * riverWidth * w1;
+            const float rightZ1 = z1 + side.z * riverWidth * w1;
 
-        waterVertices.push_back({{left0.x, left0.y, left0.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal0.x, normal0.y, normal0.z}});
-        waterVertices.push_back({{right0.x, right0.y, right0.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal0.x, normal0.y, normal0.z}});
-        waterVertices.push_back({{right1.x, right1.y, right1.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal1.x, normal1.y, normal1.z}});
-        waterVertices.push_back({{left0.x, left0.y, left0.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal0.x, normal0.y, normal0.z}});
-        waterVertices.push_back({{right1.x, right1.y, right1.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal1.x, normal1.y, normal1.z}});
-        waterVertices.push_back({{left1.x, left1.y, left1.z}, {waterColor[0], waterColor[1], waterColor[2]}, {normal1.x, normal1.y, normal1.z}});
+            appendWaterVertex(leftX0, leftZ0);
+            appendWaterVertex(rightX0, rightZ0);
+            appendWaterVertex(rightX1, rightZ1);
+            appendWaterVertex(leftX0, leftZ0);
+            appendWaterVertex(rightX1, rightZ1);
+            appendWaterVertex(leftX1, leftZ1);
+        }
     }
 
     const UINT waterBufferSize = static_cast<UINT>(waterVertices.size() * sizeof(Vertex));
@@ -614,6 +622,9 @@ void Renderer::Render() {
     mappedConstants_->lightDirection[1] = lightDirection.y;
     mappedConstants_->lightDirection[2] = lightDirection.z;
     mappedConstants_->timeSeconds += deltaSeconds;
+    mappedConstants_->cameraPosition[0] = cameraPosition_.x;
+    mappedConstants_->cameraPosition[1] = cameraPosition_.y;
+    mappedConstants_->cameraPosition[2] = cameraPosition_.z;
 
     ThrowIfFailed(commandAllocator_->Reset());
     ThrowIfFailed(commandList_->Reset(commandAllocator_.Get(), pipelineState_.Get()));
