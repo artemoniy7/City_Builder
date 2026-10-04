@@ -28,6 +28,7 @@ struct PixelInput
     float3 worldPosition : POSITION0;
     float3 color         : COLOR;
     float3 normal        : NORMAL;
+    float waterDepth     : WATERDEPTH;
     float4 shadowPosition : POSITION1;
 };
 
@@ -39,6 +40,7 @@ PixelInput VSMain(VertexInput input)
     output.worldPosition = input.position;
     output.color         = input.color;
     output.normal        = input.normal;
+    output.waterDepth     = input.waterDepth;
     output.shadowPosition = mul(worldPosition, lightViewProjection);
     return output;
 }
@@ -107,15 +109,15 @@ WaveResult ApplyWave(float3 position, float2 direction, float wavelength, float 
     return result;
 }
 
-float3 DisplaceWater(float3 position)
+float3 DisplaceWater(float3 position, float waveScale)
 {
     const float2 directionA = normalize(float2(0.86f, 0.51f));
     const float2 directionB = normalize(float2(-0.42f, 0.91f));
     const float2 directionC = normalize(float2(0.18f, -0.98f));
 
-    WaveResult waveA = ApplyWave(position, directionA, 10.0f, 0.48f, 0.48f, 1.05f);
-    WaveResult waveB = ApplyWave(waveA.position, directionB, 5.2f, 0.22f, 0.35f, 0.78f);
-    WaveResult waveC = ApplyWave(waveB.position, directionC, 2.8f, 0.09f, 0.22f, 1.35f);
+    WaveResult waveA = ApplyWave(position, directionA, 10.0f, 0.48f * waveScale, 0.48f, 1.05f);
+    WaveResult waveB = ApplyWave(waveA.position, directionB, 5.2f, 0.22f * waveScale, 0.35f, 0.78f);
+    WaveResult waveC = ApplyWave(waveB.position, directionC, 2.8f, 0.09f * waveScale, 0.22f, 1.35f);
     return waveC.position;
 }
 
@@ -126,21 +128,20 @@ PixelInput WaterVS(VertexInput input)
         float3(cameraPosition[0], cameraPosition[1], cameraPosition[2]),
         input.position);
 
-    // At a strategic-map distance the individual wave geometry is no longer
-    // useful. Keep the surface flat and skip all Gerstner/normal calculations.
-    // LOD follows the actual zoom radius, not the distance to a particular
-    // river vertex. This keeps waves visible whenever the player zooms in.
     const bool useStaticWater = cameraOrbitDistance >= 5500.0f;
-    const float3 world = useStaticWater ? input.position : DisplaceWater(input.position);
+    const float shoreWaveFade = smoothstep(0.15f, 2.5f, input.waterDepth);
+    const float3 world = useStaticWater
+        ? input.position
+        : DisplaceWater(input.position, shoreWaveFade);
 
     float3 surfaceNormal = input.normal;
     if (!useStaticWater)
     {
-        // Sample the deformed surface a tiny distance away in both axes to get
-        // the true normal of the animated wave geometry.
         const float sampleOffset = 0.12f;
-        const float3 offsetX = DisplaceWater(input.position + float3(sampleOffset, 0.0f, 0.0f));
-        const float3 offsetZ = DisplaceWater(input.position + float3(0.0f, 0.0f, sampleOffset));
+        const float3 offsetX = DisplaceWater(
+            input.position + float3(sampleOffset, 0.0f, 0.0f), shoreWaveFade);
+        const float3 offsetZ = DisplaceWater(
+            input.position + float3(0.0f, 0.0f, sampleOffset), shoreWaveFade);
         surfaceNormal = normalize(cross(offsetZ - world, offsetX - world));
     }
 
@@ -148,7 +149,8 @@ PixelInput WaterVS(VertexInput input)
     output.worldPosition = world;
     output.color = input.color;
     output.normal = surfaceNormal;
-    output.shadowPosition = 0.0f;
+    output.waterDepth = input.waterDepth;
+    output.shadowPosition = mul(float4(world, 1.0f), lightViewProjection);
     return output;
 }
 
@@ -158,28 +160,63 @@ float4 PSWater(PixelInput input) : SV_TARGET
         float3(cameraPosition[0], cameraPosition[1], cameraPosition[2]),
         input.worldPosition);
 
-    // Match the vertex-stage cutoff: distant rivers and the sea are rendered
-    // as a single flat water color instead of animated waves.
-    if (cameraOrbitDistance >= 5500.0f)
-        return float4(input.color, 1.0f);
+    const float3 skyColor = float3(0.23f, 0.58f, 0.92f);
+    const float3 shallowColor = float3(0.08f, 0.46f, 0.47f);
+    const float3 deepColor = float3(0.008f, 0.095f, 0.15f);
+    const float3 sunColor = float3(1.0f, 0.86f, 0.58f);
 
-    const float3 normal = normalize(input.normal);
-    const float3 viewDirection = normalize(float3(cameraPosition[0], cameraPosition[1], cameraPosition[2]) - input.worldPosition);
+    // TerrainHeight is baked into the water mesh as waterDepth. This avoids a
+    // second terrain texture while still giving every water pixel a local depth.
+    const float depthFactor = smoothstep(0.5f, 18.0f, input.waterDepth);
+    const float3 waterColor = lerp(shallowColor, deepColor, depthFactor);
+
+    const float3 baseNormal = normalize(input.normal);
+    float3 normal = baseNormal;
+
+    if (cameraOrbitDistance < 5500.0f)
+    {
+        // Two small, independent normal ripples keep the surface alive even
+        // when the geometric Gerstner displacement is subtle.
+        const float rippleA =
+            sin(dot(input.worldPosition.xz, float2(0.62f, 0.31f)) + timeSeconds * 1.85f);
+        const float rippleB =
+            sin(dot(input.worldPosition.xz, float2(-0.27f, 0.71f)) - timeSeconds * 1.25f);
+        const float waveNormalStrength = 0.075f * smoothstep(0.15f, 2.5f, input.waterDepth);
+        normal.x += rippleA * waveNormalStrength;
+        normal.z += rippleB * waveNormalStrength;
+        normal = normalize(normal);
+    }
+
+    const float3 viewDirection = normalize(
+        float3(cameraPosition[0], cameraPosition[1], cameraPosition[2]) - input.worldPosition);
     const float3 sunDirection = normalize(lightDirection);
+    const float3 halfVector = normalize(sunDirection + viewDirection);
 
-    const float fresnel = pow(1.0f - saturate(dot(normal, viewDirection)), 4.0f);
-    const float diffuse = 0.15f + 0.25f * saturate(dot(normal, sunDirection));
-    const float specular = pow(saturate(dot(reflect(-sunDirection, normal), viewDirection)), 72.0f);
+    // Fresnel makes the surface reflect more sky at grazing viewing angles.
+    const float fresnel = pow(1.0f - saturate(dot(normal, viewDirection)), 5.0f);
+    const float3 reflectedColor = lerp(waterColor, skyColor, 0.10f + fresnel * 0.72f);
 
-    const float rippleA = sin(dot(input.worldPosition.xz, float2(0.45f, 0.23f)) + timeSeconds * 1.7f);
-    const float rippleB = sin(dot(input.worldPosition.xz, float2(-0.31f, 0.52f)) - timeSeconds * 1.2f);
-    const float microRipples = 0.5f + 0.5f * rippleA * rippleB;
+    const float shadow = CalculateShadow(input.shadowPosition);
+    const float diffuse = 0.12f + 0.34f * saturate(dot(normal, sunDirection));
 
-    const float3 deepWater = float3(0.015f, 0.12f, 0.16f);
-    const float3 skyReflection = float3(0.28f, 0.55f, 0.68f);
-    const float3 reflectedColor = lerp(skyReflection, float3(0.65f, 0.80f, 0.84f), microRipples * 0.25f);
-    const float3 baseColor = lerp(deepWater, reflectedColor, 0.18f + fresnel * 0.70f);
-    const float3 finalColor = baseColor * diffuse + specular * float3(0.95f, 0.98f, 1.0f);
+    // Blinn-Phong sun highlight. Shadowing suppresses the highlight just like
+    // the terrain's direct-light term.
+    const float nDotL = saturate(dot(normal, sunDirection));
+    const float specularPower = 96.0f;
+    const float specular = pow(saturate(dot(normal, halfVector)), specularPower)
+        * nDotL * shadow;
+    const float3 sunReflection = sunColor * specular * 1.35f;
 
-    return float4(finalColor, 1.0f);
+    float3 finalColor = reflectedColor * diffuse + sunReflection;
+
+    // Shallow water receives a soft foam tint where the submerged terrain is
+    // close to the surface. It fades away naturally with depth.
+    const float foam = 1.0f - smoothstep(0.25f, 1.5f, input.waterDepth);
+    finalColor = lerp(finalColor, float3(0.88f, 0.95f, 0.92f), foam * 0.60f);
+
+    // At strategic-map distance, remove the expensive animated terms while
+    // keeping the same depth-aware water material.
+    const float alpha = smoothstep(0.05f, 2.0f, input.waterDepth);
+    const float distantAlpha = cameraOrbitDistance >= 5500.0f ? 1.0f : alpha;
+    return float4(finalColor, distantAlpha);
 }
