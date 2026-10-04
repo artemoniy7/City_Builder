@@ -30,6 +30,7 @@ constexpr int kRiverCurveSamples = 48;
 
 struct RiverDefinition {
     std::array<city::math::Vector3, kRiverPathPoints> path{};
+    std::array<city::math::Vector3, kRiverCurveSamples + 1> curveSamples{};
     std::array<float, kRiverPathPoints> waterLevels{};
     std::array<float, kRiverPathPoints> widths{};
     int pathCount{};
@@ -330,6 +331,10 @@ struct HydroCell {
     bool operator>(const HydroCell& other) const { return elevation > other.elevation; }
 };
 
+city::math::Vector3 RiverCurvePoint(
+    const RiverDefinition& river,
+    float pathT);
+
 WorldGenerationData GenerateWorld() {
     std::random_device rd;
     const std::uint64_t seed =
@@ -573,6 +578,18 @@ WorldGenerationData GenerateWorld() {
         river.waterLevels[river.pathCount - 1] = kSeaLevel + 0.8f;
     }
 
+    // Bake the visible river splines once. Terrain sampling can then use
+    // cheap segment-distance tests instead of reconstructing Catmull-Rom points
+    // for every terrain query.
+    for (auto& river : world.rivers) {
+        if (river.pathCount < 2) continue;
+        for (int sample = 0; sample <= kRiverCurveSamples; ++sample) {
+            const float t = static_cast<float>(sample) /
+                static_cast<float>(kRiverCurveSamples);
+            river.curveSamples[sample] = RiverCurvePoint(river, t);
+        }
+    }
+
     return world;
 }
 
@@ -668,12 +685,8 @@ float DistanceToRiverCurve(
     pathT = 0.0f;
 
     for (int sample = 0; sample < kRiverCurveSamples; ++sample) {
-        const float t0 = static_cast<float>(sample) /
-            static_cast<float>(kRiverCurveSamples);
-        const float t1 = static_cast<float>(sample + 1) /
-            static_cast<float>(kRiverCurveSamples);
-        const auto a = RiverCurvePoint(river, t0);
-        const auto b = RiverCurvePoint(river, t1);
+        const auto& a = river.curveSamples[sample];
+        const auto& b = river.curveSamples[sample + 1];
 
         float segmentT = 0.0f;
         const float distance = DistanceToSegment2D(x, z, a, b, segmentT);
