@@ -29,19 +29,27 @@ float TerrainHeight(float x, float z) {
     const float riverCenterX = -60.0f + 6.0f * std::sin(z * 0.018f);
     const float riverLateralDistance = std::abs(x - riverCenterX);
     constexpr float riverBedHalfWidth = 10.0f;
-    constexpr float riverBankHalfWidth = 27.0f;
+    constexpr float riverBankHalfWidth = 22.0f;
+    constexpr float riverOuterHalfWidth = 36.0f;
     constexpr float riverBedHeight = -7.5f;
     constexpr float riverBankHeight = -4.0f;
 
-    if (riverLateralDistance < riverBankHalfWidth && z > -230.0f && z < 70.0f) {
-        const float t = std::clamp(
-            (riverLateralDistance - riverBedHalfWidth) /
-            (riverBankHalfWidth - riverBedHalfWidth),
-            0.0f, 1.0f);
+    if (riverLateralDistance < riverOuterHalfWidth && z > -230.0f && z < 70.0f) {
+        if (riverLateralDistance <= riverBedHalfWidth) {
+            return std::min(baseHeight, riverBedHeight);
+        }
+
+        if (riverLateralDistance <= riverBankHalfWidth) {
+            const float t = (riverLateralDistance - riverBedHalfWidth) /
+                (riverBankHalfWidth - riverBedHalfWidth);
+            const float smoothT = t * t * (3.0f - 2.0f * t);
+            return riverBedHeight + (riverBankHeight - riverBedHeight) * smoothT;
+        }
+
+        const float t = (riverLateralDistance - riverBankHalfWidth) /
+            (riverOuterHalfWidth - riverBankHalfWidth);
         const float smoothT = t * t * (3.0f - 2.0f * t);
-        const float desiredChannelHeight =
-            riverBedHeight + (std::max(baseHeight, riverBankHeight) - riverBedHeight) * smoothT;
-        return std::min(baseHeight, desiredChannelHeight);
+        return riverBankHeight + (baseHeight - riverBankHeight) * smoothT;
     }
 
     return baseHeight;
