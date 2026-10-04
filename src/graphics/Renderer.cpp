@@ -21,7 +21,30 @@ float TerrainHeight(float x, float z) {
     const float mountainDistance = (x - 210.0f) * (x - 210.0f) + (z - 170.0f) * (z - 170.0f);
     const float mountainBase = std::exp(-(210.0f * 210.0f + 170.0f * 170.0f) / 28000.0f);
     const float mountain = 115.0f * (std::exp(-mountainDistance / 28000.0f) - mountainBase);
-    return rollingHills + ridge + mountain;
+    const float baseHeight = rollingHills + ridge + mountain;
+
+    // Carve a shallow, sandy river channel into the existing lowland.
+    // The water sits above the bed, while the raised outer banks keep the
+    // shoreline physically connected to the surrounding terrain.
+    const float riverCenterX = -60.0f + 6.0f * std::sin(z * 0.018f);
+    const float riverLateralDistance = std::abs(x - riverCenterX);
+    constexpr float riverBedHalfWidth = 10.0f;
+    constexpr float riverBankHalfWidth = 27.0f;
+    constexpr float riverBedHeight = -7.5f;
+    constexpr float riverBankHeight = -4.0f;
+
+    if (riverLateralDistance < riverBankHalfWidth && z > -230.0f && z < 70.0f) {
+        const float t = std::clamp(
+            (riverLateralDistance - riverBedHalfWidth) /
+            (riverBankHalfWidth - riverBedHalfWidth),
+            0.0f, 1.0f);
+        const float smoothT = t * t * (3.0f - 2.0f * t);
+        const float desiredChannelHeight =
+            riverBedHeight + (std::max(baseHeight, riverBankHeight) - riverBedHeight) * smoothT;
+        return std::min(baseHeight, desiredChannelHeight);
+    }
+
+    return baseHeight;
 }
 
 city::math::Vector3 TerrainNormal(float x, float z) {
