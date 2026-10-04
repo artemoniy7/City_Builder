@@ -37,7 +37,9 @@ private:
         float lightDirection[3];
         float padding{};
         float timeSeconds{};
-        float waterPadding[3]{};
+        float waterPadding{};
+        float cameraPosition[3]{};
+        float cameraPadding{};
     };
 
     void CreateDeviceResources();
