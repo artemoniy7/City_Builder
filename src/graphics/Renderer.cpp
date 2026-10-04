@@ -402,7 +402,16 @@ void Renderer::CreateAssets() {
 }
 
 void Renderer::UpdateCamera(float deltaSeconds) {
-    const float speed = 8.0f * deltaSeconds;
+    // Pan speed grows with zoom distance, similar to city-builder camera controls:
+    // a distant camera needs to cross much more world space per second.
+    constexpr float baseMoveSpeed = 8.0f;
+    constexpr float referenceOrbitDistance = 18.0f;
+    constexpr float maxMoveSpeedMultiplier = 12.0f;
+    const float zoomSpeedMultiplier = std::clamp(
+        cameraOrbitDistance_ / referenceOrbitDistance,
+        1.0f,
+        maxMoveSpeedMultiplier);
+    const float speed = baseMoveSpeed * zoomSpeedMultiplier * deltaSeconds;
     const float turnSpeed = 1.5f * deltaSeconds;
 
     // Q/E orbit around the point the camera is looking at instead of rotating in place.
