@@ -22,9 +22,10 @@ namespace {
 constexpr float kWorldSize = 30000.0f;
 constexpr float kWorldHalfSize = kWorldSize * 0.5f;
 constexpr float kSeaLevel = -8.0f;
-constexpr int kHydrologyResolution = 128;
+constexpr int kHydrologyResolution = 160;
 constexpr int kRiverCount = 4;
-constexpr int kRiverPathPoints = 32;
+constexpr int kRiverPathPoints = 40;
+constexpr int kRiverCurveSamples = 48;
 
 struct RiverDefinition {
     std::array<city::math::Vector3, kRiverPathPoints> path{};
@@ -321,35 +322,36 @@ WorldGenerationData GenerateWorld() {
             river.path[i] = {worldX(cx), 0.0f, worldZ(cz)};
         }
 
-        // Keep the traced order: source -> downstream mouth. This also keeps
-        // the water-level profile monotonic in the same direction.
-
-        // Smooth the coarse D8 staircase while retaining the hydrological route.
-        for (int i = 1; i + 1 < river.pathCount; ++i) {
-            river.path[i].x =
-                0.25f * river.path[i - 1].x +
-                0.50f * river.path[i].x +
-                0.25f * river.path[i + 1].x;
-            river.path[i].z =
-                0.25f * river.path[i - 1].z +
-                0.50f * river.path[i].z +
-                0.25f * river.path[i + 1].z;
-        }
-
+        // Keep the traced order: source -> downstream mouth.
+        // The D8 route is the hydrological truth; it is kept as control points
+        // and converted to a smooth centripetal curve only when sampled.
         const float sourceHeight = BaseTerrainHeight(
             river.path[0].x, river.path[0].z, seed);
-        float previousWater = sourceHeight - 12.0f;
+        float previousWater = sourceHeight - 10.0f;
 
         for (int i = 0; i < river.pathCount; ++i) {
-            const float t = static_cast<float>(i) / static_cast<float>(river.pathCount - 1);
-            const float ground = BaseTerrainHeight(river.path[i].x, river.path[i].z, seed);
-            const float desired = (sourceHeight - 12.0f) * (1.0f - t) + (kSeaLevel + 0.8f) * t;
-            const float water = std::min({desired, ground - 3.5f, previousWater - (i == 0 ? 0.0f : 0.35f)});
-            river.waterLevels[i] = std::max(kSeaLevel + 0.8f, water);
-            river.widths[i] = 22.0f + 105.0f * t * t;
+            const float t = static_cast<float>(i) /
+                static_cast<float>(river.pathCount - 1);
+            const float controlGround = BaseTerrainHeight(
+                river.path[i].x, river.path[i].z, seed);
+
+            // Width grows downstream, but not so aggressively that every river
+            // becomes an oversized canal.
+            river.widths[i] = 18.0f + 92.0f * std::pow(t, 1.65f);
+
+            // Start below the headwater and converge smoothly toward sea level.
+            // The extra margin leaves a real water column above the carved bed.
+            const float desired = (sourceHeight - 10.0f) * (1.0f - t) +
+                (kSeaLevel + 1.2f) * t;
+            const float water = std::min({
+                desired,
+                controlGround - 2.5f,
+                previousWater - (i == 0 ? 0.0f : 0.28f)
+            });
+            river.waterLevels[i] = std::max(kSeaLevel + 1.2f, water);
             previousWater = river.waterLevels[i];
         }
-        river.waterLevels[river.pathCount - 1] = kSeaLevel + 0.8f;
+        river.waterLevels[river.pathCount - 1] = kSeaLevel + 1.2f;
     }
 
     return world;
@@ -358,6 +360,104 @@ WorldGenerationData GenerateWorld() {
 const WorldGenerationData& GetWorldGeneration() {
     static const WorldGenerationData world = GenerateWorld();
     return world;
+}
+
+city::math::Vector3 RiverCurvePoint(
+    const RiverDefinition& river,
+    float pathT) {
+    if (river.pathCount <= 1) return river.path[0];
+
+    const float scaled = std::clamp(pathT, 0.0f, 1.0f) *
+        static_cast<float>(river.pathCount - 1);
+    const int i = std::min(
+        static_cast<int>(scaled),
+        river.pathCount - 2);
+    const float localT = scaled - static_cast<float>(i);
+
+    const auto pointAt = [&](int index) {
+        if (index < 0) {
+            const auto& p0 = river.path[0];
+            const auto& p1 = river.path[1];
+            return city::math::Vector3{
+                p0.x - (p1.x - p0.x),
+                0.0f,
+                p0.z - (p1.z - p0.z)
+            };
+        }
+        if (index >= river.pathCount) {
+            const auto& p0 = river.path[river.pathCount - 2];
+            const auto& p1 = river.path[river.pathCount - 1];
+            return city::math::Vector3{
+                p1.x + (p1.x - p0.x),
+                0.0f,
+                p1.z + (p1.z - p0.z)
+            };
+        }
+        return river.path[index];
+    };
+
+    const city::math::Vector3 p0 = pointAt(i - 1);
+    const city::math::Vector3 p1 = pointAt(i);
+    const city::math::Vector3 p2 = pointAt(i + 1);
+    const city::math::Vector3 p3 = pointAt(i + 2);
+
+    const auto knotDistance = [](const city::math::Vector3& a,
+                                 const city::math::Vector3& b) {
+        const float dx = b.x - a.x;
+        const float dz = b.z - a.z;
+        return std::sqrt(std::max(dx * dx + dz * dz, 0.0001f));
+    };
+
+    const float t0 = 0.0f;
+    const float t1 = t0 + std::sqrt(knotDistance(p0, p1));
+    const float t2 = t1 + std::sqrt(knotDistance(p1, p2));
+    const float t3 = t2 + std::sqrt(knotDistance(p2, p3));
+    const float t = t1 + localT * (t2 - t1);
+
+    const auto blend = [](const city::math::Vector3& a,
+                          const city::math::Vector3& b,
+                          float ta, float tb, float t) {
+        const float denominator = std::max(tb - ta, 0.0001f);
+        const float wa = (tb - t) / denominator;
+        const float wb = (t - ta) / denominator;
+        return city::math::Vector3{
+            a.x * wa + b.x * wb,
+            0.0f,
+            a.z * wa + b.z * wb
+        };
+    };
+
+    const city::math::Vector3 a1 = blend(p0, p1, t0, t1, t);
+    const city::math::Vector3 a2 = blend(p1, p2, t1, t2, t);
+    const city::math::Vector3 a3 = blend(p2, p3, t2, t3, t);
+    const city::math::Vector3 b1 = blend(a1, a2, t0, t2, t);
+    const city::math::Vector3 b2 = blend(a2, a3, t1, t3, t);
+    return blend(b1, b2, t1, t2, t);
+}
+
+float DistanceToRiverCurve(
+    float x, float z,
+    const RiverDefinition& river,
+    float& pathT) {
+    float bestDistance = std::numeric_limits<float>::max();
+    pathT = 0.0f;
+
+    for (int sample = 0; sample < kRiverCurveSamples; ++sample) {
+        const float t0 = static_cast<float>(sample) /
+            static_cast<float>(kRiverCurveSamples);
+        const float t1 = static_cast<float>(sample + 1) /
+            static_cast<float>(kRiverCurveSamples);
+        const auto a = RiverCurvePoint(river, t0);
+        const auto b = RiverCurvePoint(river, t1);
+
+        float segmentT = 0.0f;
+        const float distance = DistanceToSegment2D(x, z, a, b, segmentT);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            pathT = t0 + (t1 - t0) * segmentT;
+        }
+    }
+    return bestDistance;
 }
 
 float DistanceToSegment2D(
@@ -392,37 +492,44 @@ float TerrainHeight(float x, float z) {
 
     for (const auto& river : world.rivers) {
         if (river.pathCount < 2) continue;
-        float nearestDistance = std::numeric_limits<float>::max();
         float nearestT = 0.0f;
+        const float nearestDistance = DistanceToRiverCurve(
+            x, z, river, nearestT);
 
-        for (int i = 0; i + 1 < river.pathCount; ++i) {
-            float segmentT = 0.0f;
-            const float distance = DistanceToSegment2D(
-                x, z, river.path[i], river.path[i + 1], segmentT);
-            if (distance < nearestDistance) {
-                nearestDistance = distance;
-                nearestT = (static_cast<float>(i) + segmentT) /
-                    static_cast<float>(river.pathCount - 1);
-            }
-        }
-
+        // The visible water footprint is deliberately carved a little wider
+        // than the rendered ribbon. This prevents the terrain triangulation
+        // from peeking through the shoreline at any camera distance.
         const float riverWidth = RiverSampleValue(river, nearestT, river.widths);
-        const float outerWidth = riverWidth * 1.9f;
+        const float waterWidth = riverWidth * 1.08f;
+        const float outerWidth = riverWidth * 1.70f;
         if (nearestDistance >= outerWidth) continue;
 
-        const float waterLevel = RiverSampleValue(river, nearestT, river.waterLevels);
-        const float bedDepth = 10.0f + 18.0f * nearestT;
+        const float waterLevel = RiverSampleValue(
+            river, nearestT, river.waterLevels);
+        const float bedDepth = 12.0f + 22.0f * std::pow(nearestT, 0.85f);
         const float riverBed = waterLevel - bedDepth;
 
-        if (nearestDistance <= riverWidth) {
-            const float center = nearestDistance / std::max(riverWidth, 1.0f);
-            const float centerDepth = riverBed - 1.5f * (1.0f - center * center);
+        if (nearestDistance <= waterWidth) {
+            const float across = nearestDistance /
+                std::max(waterWidth, 1.0f);
+
+            // Even at the water's edge the floor stays below the surface.
+            // The center gets a deeper V-shaped channel, giving the river
+            // visible depth without ever exposing the bottom through water.
+            const float centerDepth =
+                riverBed - 2.5f * (1.0f - across * across);
             height = std::min(height, centerDepth);
         } else {
-            const float bankT = (nearestDistance - riverWidth) / (outerWidth - riverWidth);
+            const float bankT =
+                (nearestDistance - waterWidth) /
+                (outerWidth - waterWidth);
             const float smooth = bankT * bankT * (3.0f - 2.0f * bankT);
-            const float bankFloor = waterLevel + 1.5f;
-            height = std::min(height, riverBed * (1.0f - smooth) + std::max(height, bankFloor) * smooth);
+            const float bankFloor = waterLevel - 0.75f +
+                1.75f * smooth;
+            height = std::min(
+                height,
+                riverBed * (1.0f - smooth) +
+                std::max(height, bankFloor) * smooth);
         }
     }
 
@@ -855,20 +962,13 @@ void Renderer::CreateAssets() {
     };
 
     const auto sampleRiverPoint = [](const RiverDefinition& river, float t) {
-        const float scaled = std::clamp(t, 0.0f, 1.0f) *
-            static_cast<float>(river.pathCount - 1);
-        const int i0 = static_cast<int>(scaled);
-        const int i1 = std::min(i0 + 1, river.pathCount - 1);
-        const float localT = scaled - static_cast<float>(i0);
-        return math::Vector3{
-            river.path[i0].x * (1.0f - localT) + river.path[i1].x * localT,
-            0.0f,
-            river.path[i0].z * (1.0f - localT) + river.path[i1].z * localT
-        };
+        return RiverCurvePoint(river, t);
     };
 
-    constexpr int riverSegments = 56;
-    constexpr int riverWidthSegments = 8;
+    // Dense longitudinal sampling makes the river visually curved instead of
+    // revealing the original low-resolution hydrology grid.
+    constexpr int riverSegments = 112;
+    constexpr int riverWidthSegments = 10;
 
     for (const auto& river : GetWorldGeneration().rivers) {
         if (river.pathCount < 2) continue;
@@ -919,11 +1019,11 @@ void Renderer::CreateAssets() {
     }
 
     // One coarse continuous sea surface in the north-west corner.
-    constexpr int seaSegmentsX = 32;
-    constexpr int seaSegmentsZ = 32;
+    constexpr int seaSegmentsX = 72;
+    constexpr int seaSegmentsZ = 72;
     constexpr float seaMinX = -15000.0f;
-    constexpr float seaMaxX = -6500.0f;
-    constexpr float seaMinZ = 6500.0f;
+    constexpr float seaMaxX = -6000.0f;
+    constexpr float seaMinZ = 6000.0f;
     constexpr float seaMaxZ = 15000.0f;
     constexpr float seaSurface = kSeaLevel + 0.8f;
 
@@ -935,7 +1035,7 @@ void Renderer::CreateAssets() {
             const float z1 = seaMinZ + (seaMaxZ - seaMinZ) * static_cast<float>(z + 1) / seaSegmentsZ;
             const float cx = (x0 + x1) * 0.5f;
             const float cz = (z0 + z1) * 0.5f;
-            if (SeaMask(cx, cz) < 0.62f) continue;
+            if (SeaMask(cx, cz) < 0.58f) continue;
 
             appendWaterVertex(x0, seaSurface, z0);
             appendWaterVertex(x1, seaSurface, z0);
@@ -1141,8 +1241,8 @@ void Renderer::Render() {
     commandList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
     commandList_->DrawInstanced(vertexCount_, 1, 0, 0);
 
-    // Water is rendered after terrain so it blends softly with the ground while
-    // still using the terrain depth buffer to stay visually anchored to the river bed.
+    // Water is rendered after terrain as an opaque surface. The terrain has
+    // already been carved below the water level, so the channel stays clean.
     commandList_->SetPipelineState(waterPipelineState_.Get());
     commandList_->IASetVertexBuffers(0, 1, &waterVertexBufferView_);
     commandList_->DrawInstanced(waterVertexCount_, 1, 0, 0);
